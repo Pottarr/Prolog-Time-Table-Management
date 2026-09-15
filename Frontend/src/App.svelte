@@ -12,13 +12,23 @@
   let csvFile = $state(null);
   let semester = $state(1);
   let academicYear = $state(CURRENT_YEAR);
-  let status = $state('idle'); // idle | loading | error | done
+  let autoSchedule = $state(false);
+  let status = $state('idle'); // idle | loading | error | not_implemented | done
   let errorMessage = $state('');
+  let prologRequestPreview = $state(null);
   let pdfUrl = $state('');
   let pdfFilename = $state('');
 
   function onFileChange(event) {
     csvFile = event.target.files?.[0] ?? null;
+  }
+
+  function resetResult() {
+    status = 'loading';
+    errorMessage = '';
+    prologRequestPreview = null;
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    pdfUrl = '';
   }
 
   async function handleSubmit(event) {
@@ -30,25 +40,34 @@
       return;
     }
 
-    status = 'loading';
-    errorMessage = '';
-    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
-    pdfUrl = '';
+    resetResult();
 
     const formData = new FormData();
     formData.append('csv_file', csvFile);
     formData.append('semester', String(semester));
     formData.append('academic_year', String(academicYear));
 
+    const endpoint = autoSchedule ? '/api/schedule/auto' : '/api/schedule/pdf';
+
     try {
-      const response = await fetch(`${API_BASE}/api/schedule/pdf`, {
+      const response = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         body: formData,
       });
 
+      if (response.status === 501) {
+        const body = await response.json().catch(() => null);
+        status = 'not_implemented';
+        errorMessage =
+          body?.detail?.message ?? 'Auto-scheduling is not implemented yet.';
+        prologRequestPreview = body?.detail?.prolog_request ?? null;
+        return;
+      }
+
       if (!response.ok) {
         const body = await response.json().catch(() => null);
-        throw new Error(body?.detail ?? `Request failed with status ${response.status}`);
+        const detail = typeof body?.detail === 'string' ? body.detail : null;
+        throw new Error(detail ?? `Request failed with status ${response.status}`);
       }
 
       const blob = await response.blob();
@@ -89,13 +108,47 @@
       </select>
     </label>
 
+    <label class="checkbox-row">
+      <input type="checkbox" bind:checked={autoSchedule} />
+      Auto-scheduling (let Prolog pick day / time / room)
+    </label>
+
+    {#if autoSchedule}
+      <p class="hint">
+        Leave <code>day</code>, <code>start</code>, or <code>room</code> blank
+        (or write <code>NULL</code>) for whatever the professor is flexible
+        on. <code>span</code>, <code>title</code>, and <code>prof</code> are
+        always required. Example rows:
+      </p>
+      <pre class="hint-example">NULL,NULL,13,3,Algorithms,Dr. Veera
+ECC-804,Mon,NULL,3,Databases,Dr. Suphamit</pre>
+      <p class="hint">
+        The first means "any day, any room, but must start at 13:00"; the
+        second means "must be room ECC-804 on Monday, any start time".
+      </p>
+    {/if}
+
     <button type="submit" disabled={status === 'loading'}>
-      {status === 'loading' ? 'Generating…' : 'Generate PDF'}
+      {#if status === 'loading'}
+        {autoSchedule ? 'Sending…' : 'Generating…'}
+      {:else}
+        {autoSchedule ? 'Run auto-scheduling' : 'Generate PDF'}
+      {/if}
     </button>
   </form>
 
   {#if status === 'error'}
     <p class="error">{errorMessage}</p>
+  {/if}
+
+  {#if status === 'not_implemented'}
+    <div class="notice">
+      <p>{errorMessage}</p>
+      {#if prologRequestPreview}
+        <p>Request the gateway will send to the Prolog service once it exists:</p>
+        <pre>{JSON.stringify(prologRequestPreview, null, 2)}</pre>
+      {/if}
+    </div>
   {/if}
 
   {#if status === 'done' && pdfUrl}
@@ -131,10 +184,32 @@
     font-weight: 600;
   }
 
+  label.checkbox-row {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
   select,
   input[type='file'] {
     font: inherit;
     padding: 0.35rem;
+  }
+
+  .hint {
+    margin: 0;
+    font-size: 0.9rem;
+    color: #444;
+  }
+
+  .hint-example {
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    background: #f4f4f4;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    overflow-x: auto;
   }
 
   button {
@@ -152,6 +227,20 @@
   .error {
     color: #b00020;
     white-space: pre-wrap;
+  }
+
+  .notice {
+    background: #fff8e1;
+    border: 1px solid #e0c46c;
+    border-radius: 4px;
+    padding: 0.75rem 1rem;
+  }
+
+  .notice pre {
+    overflow-x: auto;
+    background: #fffdf5;
+    padding: 0.5rem;
+    border-radius: 4px;
   }
 
   .result {
