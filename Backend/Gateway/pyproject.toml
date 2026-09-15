@@ -1,0 +1,10 @@
+[project]
+name = "gateway"
+version = "0.1.0"
+description = "Gateway API: accepts a classroom-schedule CSV and renders it to PDF via typst"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.141.1",
+    "python-multipart>=0.0.32",
+    "uvicorn[standard]>=0.53.0",
+]
