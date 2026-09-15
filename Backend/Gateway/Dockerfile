@@ -4,7 +4,7 @@ FROM debian:bookworm-slim AS typst-fetch
 ARG TYPST_VERSION=0.12.0
 ARG TARGETARCH
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl xz-utils \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
