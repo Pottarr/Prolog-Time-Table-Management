@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+dist/
+.svelte-kit/
+
+# Editors / OS
+.DS_Store
+*.swp

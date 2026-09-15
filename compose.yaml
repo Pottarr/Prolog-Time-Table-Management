@@ -1,0 +1,18 @@
+services:
+  frontend:
+    build: ./Frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - gateway
+
+  gateway:
+    build: ./Backend/Gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - CORS_ALLOW_ORIGINS=http://localhost:8080
+
+# The Prolog service (Backend/Prolog) isn't wired in yet — the gateway
+# currently only renders the uploaded CSV to PDF via typst. It'll be added
+# here once the gateway starts calling into it for schedule generation.
