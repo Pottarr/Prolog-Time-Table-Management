@@ -2,7 +2,7 @@ services:
   frontend:
     build: ./Frontend
     ports:
-      - "8080:80"
+      - "9090:80"
     depends_on:
       - gateway
 
@@ -11,7 +11,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - CORS_ALLOW_ORIGINS=http://localhost:8080
+      - CORS_ALLOW_ORIGINS=http://localhost:9090
 
 # The Prolog service (Backend/Prolog) isn't wired in yet — the gateway
 # currently only renders the uploaded CSV to PDF via typst. It'll be added
