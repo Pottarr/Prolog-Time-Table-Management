@@ -16,7 +16,9 @@ class TypstCompileError(RuntimeError):
     """Raised when `typst compile` exits non-zero; message is typst's own error output."""
 
 
-def render_schedule_pdf(csv_bytes: bytes, semester: int, academic_year: int) -> bytes:
+def render_schedule_pdf(
+    csv_bytes: bytes, semester: int, academic_year: int, capacities: dict[str, int]
+) -> bytes:
     """Compile the bundled typst template against the given CSV + header, return PDF bytes.
 
     The template reads `schedule.csv` and `header.json` relative to its own
@@ -28,7 +30,13 @@ def render_schedule_pdf(csv_bytes: bytes, semester: int, academic_year: int) -> 
         shutil.copy(TEMPLATE_DIR / TEMPLATE_NAME, tmp_path / TEMPLATE_NAME)
         (tmp_path / "schedule.csv").write_bytes(csv_bytes)
         (tmp_path / "header.json").write_text(
-            json.dumps({"semester": semester, "academic_year": academic_year})
+            json.dumps(
+                {
+                    "semester": semester,
+                    "academic_year": academic_year,
+                    "capacities": capacities,
+                }
+            )
         )
 
         result = subprocess.run(

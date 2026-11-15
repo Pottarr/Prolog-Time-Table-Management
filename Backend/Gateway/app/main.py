@@ -1,20 +1,26 @@
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import csv
+import io
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
+from app.building import BUILDING, FLOOR, PERIODS, ROOMS
 from app.config import CORS_ALLOW_ORIGINS
 from app.csv_validation import (
+    EXPECTED_COLUMNS,
     CsvValidationError,
     parse_partial_schedule_csv,
     validate_schedule_csv,
 )
-from app.prolog_client import build_prolog_request
+from app.prolog_engine import PrologError, generate_timetable, is_parent
+from app.schedule_config import ConfigValidationError, parse_schedule_config
 from app.typst_render import TypstCompileError, render_schedule_pdf
 
 app = FastAPI(title="Prolog Time Table Management Gateway")
 
 HTTP_422_UNPROCESSABLE_ENTITY = 422
-HTTP_501_NOT_IMPLEMENTED = 501
+HTTP_500_INTERNAL_SERVER_ERROR = 500
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,25 +29,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-VALID_SEMESTERS = (1, 2)
-MIN_ACADEMIC_YEAR = 2000
-MAX_ACADEMIC_YEAR = 2100
+async def _read_config(config_file: UploadFile) -> dict:
+    try:
+        return parse_schedule_config(await config_file.read())
+    except ConfigValidationError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
 
-def _validate_semester_and_year(semester: int, academic_year: int) -> None:
-    if semester not in VALID_SEMESTERS:
-        raise HTTPException(
-            status_code=HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"semester must be one of {VALID_SEMESTERS}, got {semester}.",
-        )
-    if not (MIN_ACADEMIC_YEAR <= academic_year <= MAX_ACADEMIC_YEAR):
-        raise HTTPException(
-            status_code=HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"academic_year must be between {MIN_ACADEMIC_YEAR} and "
-                f"{MAX_ACADEMIC_YEAR}, got {academic_year}."
-            ),
-        )
+async def _read_complete_schedule(csv_file: UploadFile, config: dict) -> tuple[bytes, list[dict]]:
+    csv_bytes = await csv_file.read()
+    try:
+        return csv_bytes, validate_schedule_csv(csv_bytes, config["capacities"])
+    except CsvValidationError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+
+def _schedule_response(config: dict, classes: list[dict]) -> dict:
+    """The JSON shape the frontend's floor plan and timetables consume."""
+    return {
+        "building": BUILDING,
+        "floor": FLOOR,
+        "rooms": ROOMS,
+        "periods": PERIODS,
+        "semester": config["semester"],
+        "academic_year": config["academic_year"],
+        "capacities": config["capacities"],
+        "classes": classes,
+    }
+
+
+def _to_csv(classes: list[dict]) -> str:
+    out = io.StringIO()
+    writer = csv.DictWriter(
+        out, fieldnames=EXPECTED_COLUMNS, extrasaction="ignore", lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(classes)
+    return out.getvalue()
 
 
 @app.get("/api/health")
@@ -49,29 +73,52 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/api/prolog/parent")
+def prolog_parent(parent: str, child: str) -> dict:
+    """Smoke test for the Prolog engine.
+
+    Successor to the old standalone Prolog container's `/parent` HTTP
+    handler — same `parent(Parent, Child)` query, now answered by `swipl`
+    inside this container via `app.prolog_engine`.
+    """
+    return {"parent": parent, "child": child, "result": is_parent(parent, child)}
+
+
+@app.post("/api/schedule/parse")
+async def parse_schedule(
+    csv_file: UploadFile = File(...),
+    config_file: UploadFile = File(...),
+) -> dict:
+    """Validates a *complete* schedule CSV and returns it as JSON.
+
+    Same inputs and checks as `/api/schedule/pdf`; the frontend uses this to draw the
+    clickable floor plan and per-room timetables, and fetches the PDF from
+    `/api/schedule/pdf` separately when the user asks for it.
+    """
+    config = await _read_config(config_file)
+    _, classes = await _read_complete_schedule(csv_file, config)
+    return _schedule_response(config, classes)
+
+
 @app.post("/api/schedule/pdf")
 async def generate_schedule_pdf(
     csv_file: UploadFile = File(...),
-    semester: int = Form(...),
-    academic_year: int = Form(...),
+    config_file: UploadFile = File(...),
 ) -> Response:
     """Renders a *complete* schedule CSV straight to PDF.
 
     Every row must already have room, day, and start filled in — for a
     CSV where professors left some of those blank, use
-    `/api/schedule/auto` instead.
+    `/api/schedule/auto` first (its response carries the completed CSV).
     """
-    _validate_semester_and_year(semester, academic_year)
-
-    csv_bytes = await csv_file.read()
-
-    try:
-        validate_schedule_csv(csv_bytes)
-    except CsvValidationError as exc:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    config = await _read_config(config_file)
+    csv_bytes, _ = await _read_complete_schedule(csv_file, config)
+    semester, academic_year = config["semester"], config["academic_year"]
 
     try:
-        pdf_bytes = render_schedule_pdf(csv_bytes, semester, academic_year)
+        pdf_bytes = render_schedule_pdf(
+            csv_bytes, semester, academic_year, config["capacities"]
+        )
     except TypstCompileError as exc:
         raise HTTPException(
             status_code=HTTP_422_UNPROCESSABLE_ENTITY,
@@ -89,39 +136,48 @@ async def generate_schedule_pdf(
 @app.post("/api/schedule/auto")
 async def generate_schedule_auto(
     csv_file: UploadFile = File(...),
-    semester: int = Form(...),
-    academic_year: int = Form(...),
+    config_file: UploadFile = File(...),
 ) -> dict:
-    """Accepts a *partial* schedule CSV for auto-scheduling.
+    """Accepts a *partial* schedule CSV and lets Prolog fill in the blanks.
 
     `room`, `day`, and `start` may each be blank or "NULL" — meaning the
-    professor is flexible on that dimension. `span`, `title`, and `prof`
-    are always required.
+    professor is flexible on that dimension. `span`, `title`, `prof`,
+    and `students` are always required.
 
-    The gateway does not yet call the Prolog service (it isn't
-    implemented there), so this always responds 501 with the request
-    payload that will eventually be POSTed to it — see
-    `app.prolog_client` for the full contract.
+    The embedded Prolog solver (`solve_timetable/5` in scheduler.pl, via
+    `app.prolog_engine`) picks a room, day and period for every flexible
+    class. On success the response has the same shape as
+    `/api/schedule/parse`, plus `csv`: the completed schedule as a CSV,
+    which the frontend posts to `/api/schedule/pdf` for the PDF. If no
+    timetable fits every rule, responds 422 with the reason.
     """
-    _validate_semester_and_year(semester, academic_year)
-
-    csv_bytes = await csv_file.read()
+    config = await _read_config(config_file)
+    capacities = config["capacities"]
 
     try:
-        courses = parse_partial_schedule_csv(csv_bytes)
+        courses = parse_partial_schedule_csv(await csv_file.read(), capacities)
     except CsvValidationError as exc:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
-    prolog_request = build_prolog_request(semester, academic_year, courses)
+    try:
+        result = generate_timetable(capacities, courses)
+    except PrologError as exc:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"The Prolog scheduler failed: {exc}",
+        )
+    if result["status"] != "ok":
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=result["reason"])
 
-    raise HTTPException(
-        status_code=HTTP_501_NOT_IMPLEMENTED,
-        detail={
-            "message": (
-                "Auto-scheduling isn't implemented yet — the gateway doesn't "
-                "call the Prolog service. This is the request it will send "
-                "once that's wired up."
-            ),
-            "prolog_request": prolog_request,
-        },
-    )
+    # Re-check Prolog's answer with the same rules a hand-written CSV must
+    # pass, so a solver bug can never reach the UI or the PDF.
+    completed_csv = _to_csv(result["assignments"])
+    try:
+        classes = validate_schedule_csv(completed_csv.encode(), capacities)
+    except CsvValidationError as exc:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Prolog returned an invalid timetable: {exc}",
+        )
+
+    return {**_schedule_response(config, classes), "csv": completed_csv}

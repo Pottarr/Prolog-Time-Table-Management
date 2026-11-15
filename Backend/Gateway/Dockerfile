@@ -31,6 +31,11 @@ WORKDIR /app
 
 COPY --from=typst-fetch /usr/local/bin/typst /usr/local/bin/typst
 
+# swi-prolog-nox provides `swipl`, which app/prolog_engine.py runs for
+# auto-scheduling — no separate Prolog container/service.
+RUN apt-get update && apt-get install -y --no-install-recommends swi-prolog-nox \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first so this layer is cached across source changes.
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev

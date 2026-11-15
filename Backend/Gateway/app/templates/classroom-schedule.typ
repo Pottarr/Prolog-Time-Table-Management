@@ -28,7 +28,8 @@
 #let time-starts = range(9, 18)
 
 // Load all classes from schedule.csv.
-// CSV columns: room,day,start,span,title,prof
+// CSV columns: room,day,start,span,title,prof,students
+// header.json: semester, academic_year, capacities (room -> seats).
 // Every unique room gets its own page.
 // `start` is the real starting hour (9–11 or 13–18); `span` is hours long.
 // Use three-letter day codes: Mon, Tue, Wed, Thu, Fri, Sat, Sun.
@@ -65,6 +66,7 @@
           span: int(row.span),
           title: row.title,
           prof: row.prof,
+          students: row.students,
         )
       }),
   ))
@@ -140,7 +142,7 @@
       )[
         #text(weight: "medium", size: 7pt)[#block.title]
         #linebreak()
-        #text(fill: rgb("#555555"), size: 6.5pt)[#block.prof]
+        #text(fill: rgb("#555555"), size: 6.5pt)[#block.prof · #block.students students]
       ])
     }
   }
@@ -155,7 +157,8 @@
     #text(size: 20pt, weight: "bold")[Classroom #room-number]
     #v(2pt)
     #text(size: 10pt, fill: rgb("#555555"))[
-      Semester #header.semester · Academic Year #header.academic_year
+      Semester #header.semester · Academic Year #header.academic_year ·
+      Capacity #header.capacities.at(room-number) seats
     ]
   ]
 
