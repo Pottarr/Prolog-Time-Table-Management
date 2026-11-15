@@ -16,14 +16,41 @@ uv run uvicorn app.main:app --reload --port 8000
 ## API
 
 - `GET /api/health` — liveness check.
+- `POST /api/schedule/parse` — same form fields and checks as
+  `/api/schedule/pdf`, but returns the schedule as JSON
+  (`building`, `floor`, `rooms`, `periods`, `semester`, `academic_year`,
+  `capacities`, `classes`). The frontend uses this to draw the clickable
+  floor plan and per-room timetables.
 - `POST /api/schedule/pdf` — multipart form with:
-  - `csv_file`: the schedule CSV (`room,day,start,span,title,prof` columns)
-  - `semester`: `1` or `2`
-  - `academic_year`: integer year
+  - `csv_file`: the schedule CSV (`room,day,start,span,title,prof,students`)
+  - `config_file`: JSON with `semester`, `academic_year`, and `rooms`
+    (capacity of each of `ECC-801` … `ECC-810`) — see `app/schedule_config.py`
 
   Returns `application/pdf` on success, or a `422` with a JSON `detail`
-  message on invalid input or an unsatisfiable/invalid schedule (e.g.
-  overlapping classes in the same room).
+  message on invalid input — e.g. a room that isn't one of the ten (see
+  `app/building.py`), a class that doesn't fit inside the morning
+  (09–12) or afternoon (13–16) period, two classes in one room's period,
+  a professor teaching two classes in the same period, or more students
+  than the room's capacity.
+- `POST /api/schedule/auto` — same two files, for an incomplete CSV.
+  Prolog fills in every blank room/day/start; the response has the same
+  shape as `/api/schedule/parse` plus `csv` (the completed schedule, to
+  post to `/api/schedule/pdf`). `422` if no timetable fits every rule.
+
+## Tests
+
+```bash
+uv run pytest
+```
+
+- `tests/test_schedule_config.py` — the uploaded config JSON.
+- `tests/test_csv_validation.py` — every scheduling rule (rooms, days,
+  periods, one class per room/professor per period, capacity), for both
+  complete and auto-scheduling CSVs.
+- `tests/test_api.py` — the HTTP routes end to end (PDF tests are skipped
+  if `typst` isn't installed).
+- `tests/test_case_files.py` — runs each hand-test file in `test/cases/`
+  and checks the result documented in `test/cases/README.md`.
 
 ## Docker
 
@@ -31,12 +58,25 @@ uv run uvicorn app.main:app --reload --port 8000
 docker build -t schedule-gateway .
 ```
 
-The image downloads a pinned `typst` release binary in a build stage so
-the runtime image doesn't need network access. Use the root
-`compose.yaml` to run this alongside the frontend.
+The image downloads a pinned `typst` release binary in a build stage, and
+installs `swi-prolog-nox` for the embedded Prolog engine (see below), so
+the runtime image doesn't need network access to build or run. Use the
+root `compose.yaml` to run this alongside the frontend.
 
 ## Prolog integration
 
-Not wired up yet — this gateway currently only renders whatever CSV it's
-given. See `MasterPlan.md` at the repo root for how the Prolog solver is
-intended to plug in later (generating the CSV instead of a human).
+`app/prolog/scheduler.pl` is the auto-scheduler: a CLP(FD) model with one
+slot variable per class (`Slot = (Day*2 + Period) * NumRooms + Room`),
+`all_distinct` over all slots (one class per room per period) and over
+each professor's times (one class at a time), and each class's domain
+limited to rooms big enough for it plus any fixed room/day/period.
+
+`app/prolog_engine.py` runs it as a `swipl` subprocess: it encodes the
+courses as plain integers (no user text ever reaches Prolog), writes one
+`request(...)` term to stdin (read with `read_term/3`, never executed) and
+reads one answer line back. The solver has a 10 s limit. It was briefly
+embedded in-process via pyswip, but pyswip 0.3.3 can't read query results
+back from SWI-Prolog 10.
+
+`GET /api/prolog/parent?parent=...&child=...` is a smoke test against the
+family-tree demo facts still in `scheduler.pl`.

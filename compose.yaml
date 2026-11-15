@@ -13,6 +13,6 @@ services:
     environment:
       - CORS_ALLOW_ORIGINS=http://localhost:9090
 
-# The Prolog service (Backend/Prolog) isn't wired in yet — the gateway
-# currently only renders the uploaded CSV to PDF via typst. It'll be added
-# here once the gateway starts calling into it for schedule generation.
+# Prolog runs inside the gateway container (`swipl`, see
+# Backend/Gateway/app/prolog_engine.py) rather than as its own service, so
+# there's no separate "prolog" container to wire in here.
