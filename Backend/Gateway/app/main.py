@@ -13,7 +13,7 @@ from app.csv_validation import (
     parse_partial_schedule_csv,
     validate_schedule_csv,
 )
-from app.prolog_engine import PrologError, generate_timetable, is_parent
+from app.prolog_engine import PrologError, generate_timetable
 from app.schedule_config import ConfigValidationError, parse_schedule_config
 from app.typst_render import TypstCompileError, render_schedule_pdf
 
@@ -71,17 +71,6 @@ def _to_csv(classes: list[dict]) -> str:
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
-
-
-@app.get("/api/prolog/parent")
-def prolog_parent(parent: str, child: str) -> dict:
-    """Smoke test for the Prolog engine.
-
-    Successor to the old standalone Prolog container's `/parent` HTTP
-    handler — same `parent(Parent, Child)` query, now answered by `swipl`
-    inside this container via `app.prolog_engine`.
-    """
-    return {"parent": parent, "child": child, "result": is_parent(parent, child)}
 
 
 @app.post("/api/schedule/parse")

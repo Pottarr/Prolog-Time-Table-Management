@@ -62,10 +62,6 @@ container: `Backend/Gateway/app/prolog_engine.py` starts `swipl` on
 briefly embedded in-process via pyswip, but pyswip 0.3.3 can't read query
 results back from SWI-Prolog 10.)
 
-See `MasterPlan.md` for the original design rationale, and
-`Prolog-Time-Table-Management-Setup.md` for how the original standalone
-Prolog container was bootstrapped.
-
 ## Repository layout
 
 ```text
@@ -74,9 +70,6 @@ Backend/Gateway/      FastAPI service — CSV/config validation, typst
                       rendering, and the Prolog scheduler (app/prolog/)
 test/                 Sample CSVs + config, and hand-test cases (test/cases/)
 compose.yaml          Runs Frontend + Gateway together
-MasterPlan.md          Design notes for the Frontend/Gateway split
-Prolog-Time-Table-Management-Setup.md   Original standalone Prolog
-                      container walkthrough (since merged into the gateway)
 ```
 
 ## Running it

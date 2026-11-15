@@ -36,17 +36,6 @@ def test_health():
     assert client.get("/api/health").json() == {"status": "ok"}
 
 
-@pytest.mark.parametrize("parent,child,result", [
-    ("alice", "bob", True),
-    ("bob", "alice", False),
-    ("alice", "Bob", False),  # not a plain lowercase atom: never sent to Prolog
-    ("alice", "bob), halt(", False),
-])
-def test_prolog_smoke_endpoint(parent, child, result):
-    response = client.get("/api/prolog/parent", params={"parent": parent, "child": child})
-    assert response.json()["result"] is result
-
-
 # ------------------------------------------------------------------ parse
 
 
