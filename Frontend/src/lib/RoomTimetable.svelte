@@ -1,13 +1,11 @@
 <script>
-  // One room's weekly timetable, laid out like a page of the PDF
-  // (Backend/Gateway/app/templates/classroom-schedule.typ): days down the
-  // side, hourly slots 09:00–16:00 across, 12:00–13:00 fixed as lunch.
-  // A room with capacity 0 isn't used for lectures and gets no table.
+  // One room's week: days down the side, the two periods across (morning
+  // 09:00–12:00 | lunch | afternoon 13:00–16:00). Every class fills exactly
+  // one period (the gateway enforces that), so one cell = one class. The
+  // grid stretches to the height it's given, and long titles shrink and
+  // clamp instead of making the page scroll.
   let { room, capacity, classes = [] } = $props();
 
-  const FIRST_HOUR = 9;
-  const SLOT_COUNT = 7; // 09:00 .. 16:00
-  const LUNCH_SLOT = 12 - FIRST_HOUR;
   const DAYS = [
     ['Mon', 'Monday'],
     ['Tue', 'Tuesday'],
@@ -17,164 +15,162 @@
     ['Sat', 'Saturday'],
     ['Sun', 'Sunday'],
   ];
+  const WEEKEND = new Set(['Sat', 'Sun']);
 
-  const pad = (hour) => `${String(hour).padStart(2, '0')}:00`;
-  const slotLabels = Array.from(
-    { length: SLOT_COUNT },
-    (_, i) => `${pad(FIRST_HOUR + i)}–${pad(FIRST_HOUR + i + 1)}`,
+  const byDayStart = $derived(
+    new Map(classes.filter((c) => c.room === room).map((c) => [`${c.day}-${c.start}`, c])),
   );
-
-  const roomClasses = $derived(classes.filter((c) => c.room === room));
-
-  // Per day, a left-to-right list of cells: a class spanning its hours,
-  // the lunch slot, or a free hour. The gateway already rejected overlaps.
-  const rows = $derived(
-    DAYS.map(([code, name]) => {
-      const byStart = new Map(
-        roomClasses.filter((c) => c.day === code).map((c) => [c.start - FIRST_HOUR, c]),
-      );
-      const cells = [];
-      for (let slot = 0; slot < SLOT_COUNT; ) {
-        const lesson = byStart.get(slot);
-        if (lesson) {
-          cells.push({ kind: 'class', slot, span: lesson.span, lesson });
-          slot += lesson.span;
-        } else {
-          cells.push({ kind: slot === LUNCH_SLOT ? 'lunch' : 'free', slot, span: 1 });
-          slot += 1;
-        }
-      }
-      return { name, cells };
-    }),
-  );
-
-  const totalHours = $derived(roomClasses.reduce((sum, c) => sum + c.span, 0));
 </script>
 
-<section class="timetable" aria-label="Timetable for {room}">
-  <header>
-    <h2>{capacity === 0 ? 'Room' : 'Classroom'} {room}</h2>
-    {#if capacity !== 0}
-      <p>
-        Capacity {capacity} seats ·
-        {roomClasses.length === 0
-          ? 'No classes scheduled this semester.'
-          : `${roomClasses.length} class${roomClasses.length === 1 ? '' : 'es'} · ${totalHours} h per week`}
-      </p>
-    {/if}
-  </header>
-
-  {#if capacity === 0}
-    <p class="not-used">Room not used for lectures.</p>
-  {:else}
-    <div class="scroll">
-      <div class="grid" style:--slots={SLOT_COUNT}>
-        <div class="head corner">Day / Time</div>
-        {#each slotLabels as label (label)}
-          <div class="head">{label}</div>
-        {/each}
-
-        {#each rows as row, rowIndex (row.name)}
-          <div class="day" style:grid-row={rowIndex + 2}>{row.name}</div>
-          {#each row.cells as cell (cell.slot)}
-            <div
-              class="cell {cell.kind}"
-              style:grid-row={rowIndex + 2}
-              style:grid-column="{cell.slot + 2} / span {cell.span}"
-            >
-              {#if cell.kind === 'class'}
-                <span class="title">{cell.lesson.title}</span>
-                <span class="prof">{cell.lesson.prof} · {cell.lesson.students} students</span>
-              {:else if cell.kind === 'lunch'}
-                <span class="lunch-label">Lunch</span>
+{#if capacity === 0}
+  <p class="not-used">Co-working space — not used for lectures.</p>
+{:else}
+  <div class="grid" role="table" aria-label="Weekly timetable for {room}">
+    <div class="row head" role="row">
+      <span role="columnheader"></span>
+      <span role="columnheader" class="lbl">Morning <em>09:00 – 12:00</em></span>
+      <span role="columnheader" class="lbl lunch">Lunch</span>
+      <span role="columnheader" class="lbl">Afternoon <em>13:00 – 16:00</em></span>
+    </div>
+    {#each DAYS as [code, name] (code)}
+      <div class="row" class:weekend={WEEKEND.has(code)} role="row">
+        <span class="day" role="rowheader" title={name}>{code}</span>
+        {#each [9, null, 13] as start, i (i)}
+          {#if start === null}
+            <span class="lunch" role="cell" aria-label="Lunch"></span>
+          {:else}
+            {@const lesson = byDayStart.get(`${code}-${start}`)}
+            <span class="cell" role="cell">
+              {#if lesson}
+                <span class="class" title="{lesson.title} — {lesson.prof}, {lesson.students} / {capacity} seats">
+                  <b>{lesson.title}</b>
+                  <span class="meta">{lesson.prof} · {lesson.students} / {capacity} seats</span>
+                </span>
               {:else}
-                <span class="dash">—</span>
+                <span class="free">Free</span>
               {/if}
-            </div>
-          {/each}
+            </span>
+          {/if}
         {/each}
       </div>
-    </div>
-  {/if}
-</section>
+    {/each}
+  </div>
+{/if}
 
 <style>
-  header h2 {
-    margin: 0;
-  }
-
-  header p {
-    margin: 0.2rem 0 0.75rem;
-    color: #555;
-  }
-
-  .not-used {
-    margin: 0.75rem 0 0;
-    padding: 1rem;
-    border: 1px dashed #999;
-    background: #f4f4f4;
-    color: #444;
-  }
-
-  .scroll {
-    overflow-x: auto;
-  }
-
   .grid {
+    height: 100%;
+    min-height: 0;
     display: grid;
-    grid-template-columns: 6.5rem repeat(var(--slots), minmax(4.5rem, 1fr));
-    grid-auto-rows: minmax(3.5rem, auto);
-    min-width: 560px;
-    border-top: 1px solid #808080;
-    border-left: 1px solid #808080;
-    font-size: 0.8rem;
+    grid-template-rows: auto repeat(7, minmax(0, 1fr));
+    /* Text scales with the window height so seven days always fit. */
+    font-size: clamp(12px, 2.1vh, 20px);
   }
 
-  .grid > div {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 0.25rem;
+  .row {
+    display: grid;
+    grid-template-columns: 4.2em 1fr 3.4em 1fr;
+    min-height: 0;
+    border-bottom: 1px solid var(--soft);
+  }
+
+  .row.head {
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .row.head > span {
+    padding: 0 0.6em 0.4em;
+    align-self: end;
+  }
+
+  .head em {
+    display: block;
+    font: 300 13px var(--sans);
+    font-style: normal;
+    letter-spacing: 0.04em;
+    text-transform: none;
+    color: var(--hair);
+  }
+
+  .head .lunch {
     text-align: center;
-    border-right: 1px solid #808080;
-    border-bottom: 1px solid #808080;
-  }
-
-  .head {
-    min-height: 2.5rem;
-    background: #aaa;
-    color: #fff;
-    font-weight: 700;
-    font-size: 0.7rem;
+    color: var(--hair);
   }
 
   .day {
-    grid-column: 1;
-    background: #bbb;
-    font-weight: 700;
+    align-self: center;
+    padding-left: 0.3em;
+    font: 600 1.35em var(--serif);
   }
 
-  .cell.class {
-    background: #eee;
+  .weekend .day {
+    color: var(--hair);
   }
 
-  .cell.lunch {
-    background: #ddd;
-    font-weight: 700;
+  .lunch {
+    border-left: 1px solid var(--soft);
+    border-right: 1px solid var(--soft);
   }
 
-  .title {
-    font-weight: 600;
-    line-height: 1.2;
+  .cell {
+    min-width: 0;
+    min-height: 0;
+    padding: 0.35em 0.6em;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
   }
 
-  .prof {
-    color: #555;
-    font-size: 0.75rem;
+  .class {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    padding-left: 0.6em;
+    border-left: 3px solid var(--accent);
   }
 
-  .dash {
-    color: #aaa;
+  .class b {
+    font-weight: 500;
+    font-size: 1.05em;
+    line-height: 1.15;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .meta {
+    font-size: 0.85em;
+    color: var(--sub);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .free {
+    font-size: 0.75em;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--soft);
+  }
+
+  .not-used {
+    margin: 0;
+    padding: 3rem 1rem;
+    text-align: center;
+    font: 300 22px var(--sans);
+    color: var(--hair);
+    border-top: 1px solid var(--soft);
+    border-bottom: 1px solid var(--soft);
+  }
+
+  @media (max-width: 899px) {
+    .grid {
+      height: auto;
+      grid-template-rows: auto;
+      grid-auto-rows: minmax(64px, auto);
+      font-size: 15px;
+    }
   }
 </style>
