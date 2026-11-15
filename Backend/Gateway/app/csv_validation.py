@@ -9,15 +9,15 @@ column is consumed. Room capacities come from the uploaded config
 import csv
 import io
 
-from app.building import BUILDING, DAYS, PERIODS, ROOMS, period_of
+from app.building import BUILDING, CLASS_HOURS, DAYS, PERIODS, ROOMS, period_of
 
 EXPECTED_COLUMNS = ["room", "day", "start", "span", "title", "prof", "students"]
 VALID_DAYS = set(DAYS)
 
-MAX_SPAN = max(end - begin for begin, end in PERIODS.values())
 PERIODS_TEXT = " or ".join(
     f"{name} {begin:02d}:00–{end:02d}:00" for name, (begin, end) in PERIODS.items()
 )
+STARTS_TEXT = " or ".join(f"{begin}" for begin, _ in PERIODS.values())
 
 
 class CsvValidationError(ValueError):
@@ -60,6 +60,10 @@ def _parse_students(value: str | None, line_no: int) -> int:
 
 def _check_capacity(room: str, students: int, capacities: dict[str, int], line_no: int) -> None:
     capacity = capacities[room]
+    if capacity == 0:
+        raise CsvValidationError(
+            f"Row {line_no}: {room} isn't used for classes (capacity 0 in the config)."
+        )
     if students > capacity:
         raise CsvValidationError(
             f"Row {line_no}: {students} students don't fit in {room} "
@@ -108,11 +112,22 @@ def _check_prof_free(
 
 
 def _check_span(span: int, line_no: int) -> None:
-    if not (1 <= span <= MAX_SPAN):
+    if span != CLASS_HOURS:
         raise CsvValidationError(
-            f"Row {line_no}: 'span' must be 1–{MAX_SPAN} hours so the class fits "
-            f"in one period ({PERIODS_TEXT}), got {span}."
+            f"Row {line_no}: 'span' must be {CLASS_HOURS} — every class takes a "
+            f"whole period ({PERIODS_TEXT}), got {span}."
         )
+
+
+def _check_start(start: int, line_no: int) -> str:
+    """Returns the period a 3-hour class starting at `start` fills."""
+    period = period_of(start, CLASS_HOURS)
+    if period is None:
+        raise CsvValidationError(
+            f"Row {line_no}: 'start' must be {STARTS_TEXT} — every class takes a "
+            f"whole period ({PERIODS_TEXT}), got {start}."
+        )
+    return period
 
 
 def validate_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[dict]:
@@ -120,7 +135,8 @@ def validate_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[dict]:
 
     Checks structure (header, day codes, integer columns), that every room
     is one of the building's rooms (see `app.building`), and the scheduling
-    rules: each class fits entirely inside the morning or afternoon period,
+    rules: each class is 3 hours and fills the morning (09:00) or
+    afternoon (13:00) period,
     a room holds at most one class per period per day, a professor teaches
     at most one class per period per day, and a class's `students` never
     exceed its room's capacity (from the config). The same course may
@@ -162,12 +178,7 @@ def validate_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[dict]:
         start, span = numbers["start"], numbers["span"]
         _check_span(span, line_no)
 
-        period = period_of(start, span)
-        if period is None:
-            raise CsvValidationError(
-                f"Row {line_no}: a class at {start}:00 for {span}h doesn't fit "
-                f"inside one period ({PERIODS_TEXT})."
-            )
+        period = _check_start(start, line_no)
 
         _check_room_free(booked, room, day, period, line_no)
         _check_prof_free(teaching, prof, day, period, line_no)
@@ -210,11 +221,11 @@ def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[d
     Unlike `validate_schedule_csv`, `room`, `day`, and `start` may each be
     blank or the literal value "NULL" — meaning the professor is flexible
     on that dimension and Prolog should pick it. `span`, `title`, `prof`,
-    and `students` are always required, since the class's length, identity
-    and size are never something to be solved for.
+    and `students` are always required (`span` must be 3), since the
+    class's length, identity and size are never something to be solved for.
 
-    Whatever *is* given must already be satisfiable: a given start/span
-    fits in a period, a given room is big enough, and with no room given,
+    Whatever *is* given must already be satisfiable: a given start is
+    9 or 13, a given room is big enough, and with no room given,
     at least one room in the building is big enough. When a row fixes
     both day and start, its professor must not already be teaching
     another fixed class in that period, and if it fixes the room too, that
@@ -275,12 +286,7 @@ def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[d
                 raise CsvValidationError(
                     f"Row {line_no}: 'start' must be blank/NULL or an integer."
                 )
-            period = period_of(start, span)
-            if period is None:
-                raise CsvValidationError(
-                    f"Row {line_no}: a class at {start}:00 for {span}h doesn't fit "
-                    f"inside one period ({PERIODS_TEXT})."
-                )
+            period = _check_start(start, line_no)
             if day is not None:
                 _check_prof_free(teaching, prof, day, period, line_no)
                 if room is not None:

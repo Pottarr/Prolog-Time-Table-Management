@@ -15,13 +15,15 @@ ROOMS = [f"{BUILDING}-{FLOOR}{n:02d}" for n in range(1, 11)]  # ECC-801 .. ECC-8
 # Week order, Monday first: the auto-scheduler fills weekdays before the weekend.
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-# Each room/day has two bookable periods, and a class must fit inside one
-# of them; a room holds at most one class per period (so two per day).
-# 12:00–13:00 between them is lunch. The PDF/UI grid still shows 09:00–19:00.
+# Each room/day has two bookable periods, and every class fills exactly one
+# of them: 3 hours, starting 09:00 (morning) or 13:00 (afternoon). A room
+# holds at most one class per period (so two per day). 12:00–13:00 between
+# them is lunch.
 PERIODS = {
     "morning": (9, 12),
     "afternoon": (13, 16),
 }
+CLASS_HOURS = 3
 
 
 def period_of(start: int, span: int) -> str | None:

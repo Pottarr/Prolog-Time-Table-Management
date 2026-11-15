@@ -10,8 +10,25 @@ services:
     build: ./Backend/Gateway
     ports:
       - "8000:8000"
+    # CORS defaults to "*" (DEFAULT_CORS_ALLOW_ORIGINS in
+    # Backend/Gateway/app/config.py). To restrict it, add e.g.:
+    # environment:
+    #   - CORS_ALLOW_ORIGINS=http://localhost:9090
+
+  # Runs the gateway test suite in the gateway image (same Python, typst
+  # and swipl as production). Only starts on request, never with `up`:
+  #   docker compose run --rm test
+  test:
+    build: ./Backend/Gateway
+    profiles: ["test"]
+    volumes:
+      - .:/repo
+    working_dir: /repo/Backend/Gateway
     environment:
-      - CORS_ALLOW_ORIGINS=http://localhost:9090
+      # Keep the container's venv out of the mounted folder, so it never
+      # clashes with a local Backend/Gateway/.venv.
+      - UV_PROJECT_ENVIRONMENT=/tmp/venv
+    command: ["sh", "-c", "uv sync --frozen --quiet && uv run pytest"]
 
 # Prolog runs inside the gateway container (`swipl`, see
 # Backend/Gateway/app/prolog_engine.py) rather than as its own service, so

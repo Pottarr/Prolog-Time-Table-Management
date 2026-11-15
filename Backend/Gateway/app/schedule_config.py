@@ -7,11 +7,12 @@ capacity of every room in the building. Example (`test/config.json`):
     {
       "semester": 1,
       "academic_year": 2026,
-      "rooms": {"ECC-801": 40, ..., "ECC-810": 40}
+      "rooms": {"ECC-801": 50, ..., "ECC-806": 0, ..., "ECC-810": 50}
     }
 
 `rooms` must list exactly the building's rooms (`app.building.ROOMS`),
-each with a positive integer capacity.
+each with a non-negative integer capacity. A capacity of 0 marks a room
+that isn't used for classes (e.g. 806, the co-working space).
 """
 
 import json
@@ -78,9 +79,10 @@ def parse_schedule_config(raw: bytes) -> dict:
         )
 
     for room, capacity in rooms.items():
-        if not _is_int(capacity) or capacity < 1:
+        if not _is_int(capacity) or capacity < 0:
             raise ConfigValidationError(
-                f"Config capacity for {room} must be a positive integer, got {capacity!r}."
+                f"Config capacity for {room} must be a whole number of seats "
+                f"(0 = not used for classes), got {capacity!r}."
             )
 
     return {

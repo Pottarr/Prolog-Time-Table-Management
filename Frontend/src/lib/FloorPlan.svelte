@@ -21,21 +21,27 @@
       .replace(ROOM_GROUP_RE, (_, number, rectAttrs, x, y, textAttrs) => {
         const room = `ECC-${number}`;
         const count = countsByRoom.get(room) ?? 0;
+        // Capacity 0 in the config = not a classroom (806 is the co-working space).
+        const unused = capacities[room] === 0;
         const state = [
           'room',
-          count > 0 ? 'booked' : 'empty',
+          unused ? 'unused' : count > 0 ? 'booked' : 'empty',
           room === selectedRoom ? 'selected' : '',
         ].join(' ');
         const classesText = count === 0 ? 'free' : `${count} class${count === 1 ? '' : 'es'}`;
-        const seats = capacities[room];
-        const label = `${room}: ${seats} seats, ${count === 0 ? 'no classes' : classesText}`;
+        const seatsText = unused ? 'not used' : `${capacities[room]} seats`;
+        const label = unused
+          ? `${room}: not used for lectures`
+          : `${room}: ${seatsText}, ${count === 0 ? 'no classes' : classesText}`;
         return (
           `<g id="room-${number}" class="${state}" data-room="${room}" role="button" tabindex="0" aria-label="${label}" aria-pressed="${room === selectedRoom}">` +
           `<title>${label}</title>` +
           `<rect ${rectAttrs}/>` +
           `<text x="${x}" y="${Number(y) - 16}"${textAttrs}>${number}</text>` +
-          `<text class="count" x="${x}" y="${Number(y) + 4}" font-size="11" text-anchor="middle" dominant-baseline="central">${seats} seats</text>` +
-          `<text class="count" x="${x}" y="${Number(y) + 20}" font-size="11" text-anchor="middle" dominant-baseline="central">${classesText}</text>` +
+          `<text class="count" x="${x}" y="${Number(y) + 4}" font-size="11" text-anchor="middle" dominant-baseline="central">${seatsText}</text>` +
+          (unused
+            ? ''
+            : `<text class="count" x="${x}" y="${Number(y) + 20}" font-size="11" text-anchor="middle" dominant-baseline="central">${classesText}</text>`) +
           `</g>`
         );
       }),
@@ -68,6 +74,7 @@
 <div class="legend">
   <span><i class="swatch booked"></i>Has classes</span>
   <span><i class="swatch empty"></i>Free all week</span>
+  <span><i class="swatch unused"></i>Not used for lectures</span>
   <span><i class="swatch selected"></i>Selected</span>
 </div>
 
@@ -93,6 +100,10 @@
 
   .plan :global(.room.empty rect) {
     fill: #f4f4f4;
+  }
+
+  .plan :global(.room.unused rect) {
+    fill: #d6d6d6;
   }
 
   .plan :global(.room .count) {
@@ -145,6 +156,10 @@
 
   .swatch.empty {
     background: #f4f4f4;
+  }
+
+  .swatch.unused {
+    background: #d6d6d6;
   }
 
   .swatch.selected {

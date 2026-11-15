@@ -102,8 +102,8 @@ def test_room_title_prof_required(capacities, row):
 # ------------------------------------------------------------------- rooms
 
 
-@pytest.mark.parametrize("room", [f"ECC-8{n:02d}" for n in range(1, 11)])
-def test_all_ten_rooms_are_accepted(capacities, room):
+@pytest.mark.parametrize("room", [f"ECC-8{n:02d}" for n in range(1, 11) if n != 6])
+def test_all_nine_class_rooms_are_accepted(capacities, room):
     ok(capacities, f"{room},Mon,9,3,A,Dr. X,10")
 
 
@@ -128,45 +128,20 @@ def test_bad_day(capacities, day):
 # ------------------------------------------------------- periods and hours
 
 
-@pytest.mark.parametrize(
-    "start,span,period",
-    [
-        (9, 3, "morning"),  # whole morning
-        (9, 1, "morning"),
-        (10, 2, "morning"),
-        (11, 1, "morning"),  # ends exactly at lunch
-        (13, 3, "afternoon"),  # whole afternoon
-        (14, 2, "afternoon"),
-        (15, 1, "afternoon"),  # ends exactly at 16:00
-    ],
-)
-def test_class_inside_one_period(capacities, start, span, period):
-    [row] = ok(capacities, f"ECC-804,Mon,{start},{span},A,Dr. X,10")
+@pytest.mark.parametrize("start,period", [(9, "morning"), (13, "afternoon")])
+def test_class_fills_a_whole_period(capacities, start, period):
+    [row] = ok(capacities, f"ECC-804,Mon,{start},3,A,Dr. X,10")
     assert row["period"] == period
 
 
-@pytest.mark.parametrize(
-    "start,span",
-    [
-        (8, 1),  # before the morning
-        (8, 3),
-        (11, 2),  # runs into lunch
-        (10, 3),
-        (12, 1),  # lunch itself
-        (14, 3),  # past 16:00
-        (15, 2),
-        (16, 1),  # after the afternoon
-        (17, 1),
-        (18, 1),
-    ],
-)
-def test_class_outside_a_period(capacities, start, span):
-    rejected(capacities, f"ECC-804,Mon,{start},{span},A,Dr. X,10", match="doesn't fit")
+@pytest.mark.parametrize("start", [8, 10, 11, 12, 14, 15, 16, 17, 18])
+def test_start_must_be_9_or_13(capacities, start):
+    rejected(capacities, f"ECC-804,Mon,{start},3,A,Dr. X,10", match="'start' must be 9 or 13")
 
 
-@pytest.mark.parametrize("span", [0, -1, 4, 9])
-def test_span_out_of_range(capacities, span):
-    rejected(capacities, f"ECC-804,Mon,9,{span},A,Dr. X,10", match="'span' must be 1–3")
+@pytest.mark.parametrize("span", [1, 2, 4, 0, -1, 9])
+def test_span_must_be_3(capacities, span):
+    rejected(capacities, f"ECC-804,Mon,9,{span},A,Dr. X,10", match="'span' must be 3")
 
 
 @pytest.mark.parametrize("field,row", [
@@ -186,18 +161,9 @@ def test_start_and_span_must_be_integers(capacities, field, row):
 def test_two_classes_in_one_room_period(capacities):
     rejected(
         capacities,
-        "ECC-804,Mon,9,1,A,Dr. X,10",
-        "ECC-804,Mon,10,2,B,Dr. Y,10",
+        "ECC-804,Mon,9,3,A,Dr. X,10",
+        "ECC-804,Mon,9,3,B,Dr. Y,10",
         match="ECC-804 already has a morning class on Mon",
-    )
-
-
-def test_short_class_still_takes_the_whole_period(capacities):
-    rejected(
-        capacities,
-        "ECC-804,Mon,9,1,A,Dr. X,10",
-        "ECC-804,Mon,11,1,B,Dr. Y,10",
-        match="one class per period",
     )
 
 
@@ -231,15 +197,6 @@ def test_professor_in_two_rooms_same_period(capacities):
         "ECC-801,Mon,9,3,A,Dr. X,10",
         "ECC-802,Mon,9,3,B,Dr. X,10",
         match="Dr. X already teaches a morning class on Mon",
-    )
-
-
-def test_professor_clash_with_non_overlapping_hours_same_period(capacities):
-    rejected(
-        capacities,
-        "ECC-801,Mon,9,1,A,Dr. X,10",
-        "ECC-802,Mon,10,2,B,Dr. X,10",
-        match="one class at a time",
     )
 
 
@@ -296,7 +253,7 @@ def test_exact_duplicate_row_clashes(capacities):
 
 @pytest.mark.parametrize(
     "room,students",
-    [("ECC-804", 40), ("ECC-805", 30), ("ECC-808", 120), ("ECC-809", 100), ("ECC-801", 1)],
+    [("ECC-804", 50), ("ECC-805", 20), ("ECC-808", 100), ("ECC-809", 100), ("ECC-801", 1)],
 )
 def test_students_within_capacity(capacities, room, students):
     ok(capacities, f"{room},Mon,9,3,A,Dr. X,{students}")
@@ -304,13 +261,28 @@ def test_students_within_capacity(capacities, room, students):
 
 @pytest.mark.parametrize(
     "room,students,capacity",
-    [("ECC-804", 41, 40), ("ECC-805", 31, 30), ("ECC-806", 100, 60), ("ECC-808", 121, 120)],
+    [("ECC-804", 51, 50), ("ECC-805", 21, 20), ("ECC-807", 100, 50), ("ECC-808", 101, 100)],
 )
 def test_students_over_capacity(capacities, room, students, capacity):
     rejected(
         capacities,
         f"{room},Mon,9,3,A,Dr. X,{students}",
         match=rf"{students} students don't fit in {room} \(capacity {capacity}\)",
+    )
+
+
+@pytest.mark.parametrize("students", [1, 10])
+def test_room_with_capacity_zero_is_not_used_for_classes(capacities, students):
+    rejected(
+        capacities,
+        f"ECC-806,Mon,9,3,A,Dr. X,{students}",
+        match=r"ECC-806 isn't used for classes \(capacity 0",
+    )
+
+
+def test_partial_fixed_room_with_capacity_zero(capacities):
+    partial_rejected(
+        capacities, "ECC-806,NULL,NULL,3,A,Dr. X,5", match="ECC-806 isn't used for classes"
     )
 
 
@@ -363,7 +335,8 @@ def test_partial_fully_fixed_row(capacities):
 @pytest.mark.parametrize("row,match", [
     ("NULL,NULL,NULL,,A,Dr. X,10", "'span' must be an integer"),
     ("NULL,NULL,NULL,NULL,A,Dr. X,10", "'span' must be an integer"),
-    ("NULL,NULL,NULL,4,A,Dr. X,10", "'span' must be 1–3"),
+    ("NULL,NULL,NULL,4,A,Dr. X,10", "'span' must be 3"),
+    ("NULL,NULL,NULL,1,A,Dr. X,10", "'span' must be 3"),
     ("NULL,NULL,NULL,3,,Dr. X,10", "'title' and 'prof' are required"),
     ("NULL,NULL,NULL,3,A,,10", "'title' and 'prof' are required"),
     ("NULL,NULL,NULL,3,A,Dr. X,", "'students' must"),
@@ -376,25 +349,25 @@ def test_partial_invalid_rows(capacities, row, match):
     partial_rejected(capacities, row, match=match)
 
 
-@pytest.mark.parametrize("start,span", [(14, 3), (11, 2), (12, 1), (16, 1)])
-def test_partial_fixed_start_must_fit_a_period(capacities, start, span):
-    partial_rejected(capacities, f"NULL,NULL,{start},{span},A,Dr. X,10", match="doesn't fit")
+@pytest.mark.parametrize("start", [10, 11, 12, 14, 16])
+def test_partial_fixed_start_must_be_9_or_13(capacities, start):
+    partial_rejected(capacities, f"NULL,NULL,{start},3,A,Dr. X,10", match="'start' must be 9 or 13")
 
 
 def test_partial_fixed_room_too_small(capacities):
     partial_rejected(
         capacities,
-        "ECC-805,NULL,NULL,3,A,Dr. X,31",
-        match=r"31 students don't fit in ECC-805 \(capacity 30\)",
+        "ECC-805,NULL,NULL,3,A,Dr. X,21",
+        match=r"21 students don't fit in ECC-805 \(capacity 20\)",
     )
 
 
 def test_partial_flexible_room_needs_some_room_big_enough(capacities):
-    partial_ok(capacities, "NULL,NULL,NULL,3,A,Dr. X,120")
+    partial_ok(capacities, "NULL,NULL,NULL,3,A,Dr. X,100")
     partial_rejected(
         capacities,
-        "NULL,NULL,NULL,3,A,Dr. X,121",
-        match=r"don't fit in any room \(largest capacity is 120\)",
+        "NULL,NULL,NULL,3,A,Dr. X,101",
+        match=r"don't fit in any room \(largest capacity is 100\)",
     )
 
 
@@ -402,7 +375,7 @@ def test_partial_professor_clash_between_fixed_rows(capacities):
     partial_rejected(
         capacities,
         "NULL,Mon,9,3,A,Dr. X,10",
-        "ECC-803,Mon,10,2,B,Dr. X,10",
+        "ECC-803,Mon,9,3,B,Dr. X,10",
         match="one class at a time",
     )
 
@@ -419,7 +392,7 @@ def test_partial_room_clash_between_fixed_rows(capacities):
     partial_rejected(
         capacities,
         "ECC-804,Mon,9,3,A,Dr. X,10",
-        "ECC-804,Mon,10,1,B,Dr. Y,10",
+        "ECC-804,Mon,9,3,B,Dr. Y,10",
         match="ECC-804 already has a morning class on Mon",
     )
 

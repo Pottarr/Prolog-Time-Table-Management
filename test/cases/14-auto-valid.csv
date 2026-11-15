@@ -2,4 +2,4 @@ room,day,start,span,title,prof,students
 NULL,NULL,NULL,3,Fully flexible,Dr. A,35
 NULL,NULL,13,3,Afternoon any day,Dr. B,100
 ECC-804,Mon,NULL,3,Fixed room and day,Dr. C,40
-NULL,Fri,9,2,Fixed day and time,Dr. D,50
+NULL,Fri,9,3,Fixed day and time,Dr. D,50

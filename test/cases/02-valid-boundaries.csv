@@ -1,8 +1,8 @@
 room,day,start,span,title,prof,students
-ECC-804,Mon,9,3,Exactly at capacity,Dr. A,40
-ECC-805,Mon,13,3,Smallest room full,Dr. B,30
-ECC-808,Tue,11,1,Ends right at lunch,Dr. C,120
-ECC-809,Tue,15,1,Ends right at 16:00,Dr. D,1
+ECC-804,Mon,9,3,Exactly at capacity,Dr. A,50
+ECC-805,Mon,13,3,Smallest room full,Dr. B,20
+ECC-808,Tue,9,3,Big room full,Dr. C,100
+ECC-809,Tue,13,3,One student,Dr. D,1
 ECC-801,Mon,9,3,Same prof other period,Dr. E,10
 ECC-801,Mon,13,3,Same prof other period,Dr. E,10
 ECC-802,Mon,9,3,Algorithms,Dr. F,40

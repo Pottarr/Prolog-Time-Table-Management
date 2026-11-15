@@ -73,9 +73,9 @@ def test_parse_semester_and_year_come_from_config():
 
 
 def test_parse_rejects_bad_csv_with_422():
-    response = post("parse", make_csv("ECC-804,Mon,9,3,A,Dr. X,41"), make_config())
+    response = post("parse", make_csv("ECC-804,Mon,9,3,A,Dr. X,51"), make_config())
     assert response.status_code == 422
-    assert response.json()["detail"] == "Row 2: 41 students don't fit in ECC-804 (capacity 40)."
+    assert response.json()["detail"] == "Row 2: 51 students don't fit in ECC-804 (capacity 50)."
 
 
 def test_parse_rejects_bad_config_with_422():
@@ -163,6 +163,7 @@ def test_auto_sample_fills_every_blank():
     assert compiler["day"] == "Fri"
     assert compiler["room"] in ("ECC-808", "ECC-809")  # 100 students: only the big rooms fit
     assert os_course["room"] == "ECC-803"
+    assert algorithms["room"] == "ECC-801"  # 35 students: the first 50-seat room
 
 
 def test_auto_csv_round_trips_through_parse_and_pdf():
@@ -181,8 +182,8 @@ def test_auto_csv_renders_to_pdf():
 
 
 def test_auto_prefers_the_smallest_room_that_fits():
-    body = post("auto", make_csv("NULL,NULL,NULL,3,Small seminar,Dr. X,25"), make_config()).json()
-    assert body["classes"][0]["room"] == "ECC-805"  # 30 seats, the smallest
+    body = post("auto", make_csv("NULL,NULL,NULL,3,Small seminar,Dr. X,15"), make_config()).json()
+    assert body["classes"][0]["room"] == "ECC-805"  # 20 seats, the smallest
 
 
 def test_auto_keeps_a_flexible_professor_out_of_their_fixed_period():
@@ -196,15 +197,16 @@ def test_auto_keeps_a_flexible_professor_out_of_their_fixed_period():
 
 
 def test_auto_fills_the_floor_exactly():
-    # 10 rooms x 7 days x 2 periods = 140 slots, one per class.
-    rows = [f"NULL,NULL,NULL,3,Class {i},Dr. {i},10" for i in range(140)]
+    # 9 class rooms (806 has capacity 0) x 7 days x 2 periods = 126 slots.
+    rows = [f"NULL,NULL,NULL,3,Class {i},Dr. {i},10" for i in range(126)]
     body = post("auto", make_csv(*rows), make_config()).json()
     slots = {(c["room"], c["day"], c["period"]) for c in body["classes"]}
-    assert len(slots) == 140
+    assert len(slots) == 126
+    assert "ECC-806" not in {room for room, _, _ in slots}
 
 
 def test_auto_unsatisfiable_when_floor_is_over_full():
-    rows = [f"NULL,NULL,NULL,3,Class {i},Dr. {i},10" for i in range(141)]
+    rows = [f"NULL,NULL,NULL,3,Class {i},Dr. {i},10" for i in range(127)]
     response = post("auto", make_csv(*rows), make_config())
     assert response.status_code == 422
     assert "No timetable satisfies every rule" in response.json()["detail"]
@@ -239,7 +241,7 @@ def test_auto_random_mixes_never_time_out_and_keep_fixed_values(seed):
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     rows = []
     for i in range(rng.randint(40, 120)):
-        students = rng.choice([10, 25, 35, 40, 55, 100, 115])
+        students = rng.choice([10, 15, 20, 35, 50, 80, 100])
         fits = [r for r in rooms if CAPACITIES[r] >= students]
         room = rng.choice(fits) if rng.random() < 0.2 else "NULL"
         day = rng.choice(days) if rng.random() < 0.25 else "NULL"
