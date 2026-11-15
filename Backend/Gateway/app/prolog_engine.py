@@ -83,7 +83,7 @@ def generate_timetable(capacities: dict[str, int], courses: list[dict]) -> dict:
         terms.append(f"c({min_room},{prof},{room},{day},{period})")
 
     request = f"request([{','.join(terms)}], {len(rooms)}, {SOLVE_TIME_LIMIT_SECONDS}).\n"
-    status, *flat = _run("main_timetable", request).split()
+    status, *flat = _run("main_timetable", request).split() or [""]
 
     if status == "timeout":
         return {
