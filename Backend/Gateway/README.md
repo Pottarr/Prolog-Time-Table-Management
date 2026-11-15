@@ -78,6 +78,3 @@ courses as plain integers (no user text ever reaches Prolog), writes one
 reads one answer line back. The solver has a 10 s limit. It was briefly
 embedded in-process via pyswip, but pyswip 0.3.3 can't read query results
 back from SWI-Prolog 10.
-
-`GET /api/prolog/parent?parent=...&child=...` is a smoke test against the
-family-tree demo facts still in `scheduler.pl`.

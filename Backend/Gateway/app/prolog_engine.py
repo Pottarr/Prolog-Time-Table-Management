@@ -1,8 +1,7 @@
 """Runs the SWI-Prolog scheduler (`prolog/scheduler.pl`) inside the gateway.
 
 Prolog used to run as its own container (`Backend/Prolog`), reachable
-over the internal Docker network — see `Prolog-Time-Table-Management-Setup.md`
-for how that was bootstrapped. It now runs in the gateway's own container:
+over the internal Docker network. It now runs in the gateway's own container:
 each call starts `swipl` on `scheduler.pl` (the same way `app.typst_render`
 shells out to `typst`), writes one request term to its stdin and reads one
 answer line back. No HTTP hop, no second container, and a hung or crashed
@@ -11,16 +10,13 @@ solver can't take the gateway down with it.
 (It was briefly embedded in-process via pyswip, but pyswip 0.3.3 — the
 latest release — can't read query results back from SWI-Prolog 10.)
 
-Per the "never expose a raw query endpoint" rule (see §10 of the setup
-doc), Prolog only ever runs fixed, known entry points (`main_parent`,
-`main_timetable`), and its stdin is read with `read_term/3`, which parses
-data and never executes it. `_as_atom` rejects anything that isn't a plain
-lowercase atom, and the timetable request is built purely from integers
-this module computes — room names, days, titles and professor names never
-reach Prolog.
+There is no raw query endpoint: Prolog only ever runs one fixed entry
+point (`main_timetable`), and its stdin is read with `read_term/3`, which
+parses data and never executes it. The request is built purely from
+integers this module computes — room names, days, titles and professor
+names never reach Prolog.
 """
 
-import re
 import subprocess
 from pathlib import Path
 
@@ -32,7 +28,6 @@ SOLVE_TIME_LIMIT_SECONDS = 10
 # Headroom over the in-Prolog limit for swipl's own startup.
 PROCESS_TIMEOUT_SECONDS = SOLVE_TIME_LIMIT_SECONDS + 10
 
-_ATOM_RE = re.compile(r"^[a-z][a-zA-Z0-9_]*$")
 _PERIOD_NAMES = list(PERIODS)
 _FREE = -1  # "Prolog picks" in the integer encoding scheduler.pl expects
 
@@ -56,22 +51,6 @@ def _run(goal: str, request: str) -> str:
     if result.returncode != 0:
         raise PrologError(result.stderr.strip() or f"swipl exited with {result.returncode}")
     return result.stdout.strip()
-
-
-def _as_atom(value: str) -> str | None:
-    """Returns `value` unchanged if it's safe to write as a Prolog atom, else None."""
-    return value if _ATOM_RE.match(value) else None
-
-
-def is_parent(parent: str, child: str) -> bool:
-    """Queries the known `parent/2` fact — the successor to the old
-    `main.pl` HTTP handler's `parent(Parent, Child)` check."""
-    parent_atom = _as_atom(parent)
-    child_atom = _as_atom(child)
-    if parent_atom is None or child_atom is None:
-        return False
-
-    return _run("main_parent", f"query({parent_atom}, {child_atom}).\n") == "true"
 
 
 def generate_timetable(capacities: dict[str, int], courses: list[dict]) -> dict:
