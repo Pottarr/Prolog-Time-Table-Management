@@ -1,11 +1,12 @@
 <script>
   // One room's weekly timetable, laid out like a page of the PDF
   // (Backend/Gateway/app/templates/classroom-schedule.typ): days down the
-  // side, hourly slots 09:00–19:00 across, 12:00–13:00 fixed as lunch.
+  // side, hourly slots 09:00–16:00 across, 12:00–13:00 fixed as lunch.
+  // A room with capacity 0 isn't used for lectures and gets no table.
   let { room, capacity, classes = [] } = $props();
 
   const FIRST_HOUR = 9;
-  const SLOT_COUNT = 10; // 09:00 .. 19:00
+  const SLOT_COUNT = 7; // 09:00 .. 16:00
   const LUNCH_SLOT = 12 - FIRST_HOUR;
   const DAYS = [
     ['Mon', 'Monday'],
@@ -52,43 +53,49 @@
 
 <section class="timetable" aria-label="Timetable for {room}">
   <header>
-    <h2>Classroom {room}</h2>
-    <p>
-      Capacity {capacity} seats ·
-      {roomClasses.length === 0
-        ? 'No classes scheduled this semester.'
-        : `${roomClasses.length} class${roomClasses.length === 1 ? '' : 'es'} · ${totalHours} h per week`}
-    </p>
+    <h2>{capacity === 0 ? 'Room' : 'Classroom'} {room}</h2>
+    {#if capacity !== 0}
+      <p>
+        Capacity {capacity} seats ·
+        {roomClasses.length === 0
+          ? 'No classes scheduled this semester.'
+          : `${roomClasses.length} class${roomClasses.length === 1 ? '' : 'es'} · ${totalHours} h per week`}
+      </p>
+    {/if}
   </header>
 
-  <div class="scroll">
-    <div class="grid" style:--slots={SLOT_COUNT}>
-      <div class="head corner">Day / Time</div>
-      {#each slotLabels as label (label)}
-        <div class="head">{label}</div>
-      {/each}
-
-      {#each rows as row, rowIndex (row.name)}
-        <div class="day" style:grid-row={rowIndex + 2}>{row.name}</div>
-        {#each row.cells as cell (cell.slot)}
-          <div
-            class="cell {cell.kind}"
-            style:grid-row={rowIndex + 2}
-            style:grid-column="{cell.slot + 2} / span {cell.span}"
-          >
-            {#if cell.kind === 'class'}
-              <span class="title">{cell.lesson.title}</span>
-              <span class="prof">{cell.lesson.prof} · {cell.lesson.students} students</span>
-            {:else if cell.kind === 'lunch'}
-              <span class="lunch-label">Lunch</span>
-            {:else}
-              <span class="dash">—</span>
-            {/if}
-          </div>
+  {#if capacity === 0}
+    <p class="not-used">Room not used for lectures.</p>
+  {:else}
+    <div class="scroll">
+      <div class="grid" style:--slots={SLOT_COUNT}>
+        <div class="head corner">Day / Time</div>
+        {#each slotLabels as label (label)}
+          <div class="head">{label}</div>
         {/each}
-      {/each}
+
+        {#each rows as row, rowIndex (row.name)}
+          <div class="day" style:grid-row={rowIndex + 2}>{row.name}</div>
+          {#each row.cells as cell (cell.slot)}
+            <div
+              class="cell {cell.kind}"
+              style:grid-row={rowIndex + 2}
+              style:grid-column="{cell.slot + 2} / span {cell.span}"
+            >
+              {#if cell.kind === 'class'}
+                <span class="title">{cell.lesson.title}</span>
+                <span class="prof">{cell.lesson.prof} · {cell.lesson.students} students</span>
+              {:else if cell.kind === 'lunch'}
+                <span class="lunch-label">Lunch</span>
+              {:else}
+                <span class="dash">—</span>
+              {/if}
+            </div>
+          {/each}
+        {/each}
+      </div>
     </div>
-  </div>
+  {/if}
 </section>
 
 <style>
@@ -101,6 +108,14 @@
     color: #555;
   }
 
+  .not-used {
+    margin: 0.75rem 0 0;
+    padding: 1rem;
+    border: 1px dashed #999;
+    background: #f4f4f4;
+    color: #444;
+  }
+
   .scroll {
     overflow-x: auto;
   }
@@ -109,7 +124,7 @@
     display: grid;
     grid-template-columns: 6.5rem repeat(var(--slots), minmax(4.5rem, 1fr));
     grid-auto-rows: minmax(3.5rem, auto);
-    min-width: 720px;
+    min-width: 560px;
     border-top: 1px solid #808080;
     border-left: 1px solid #808080;
     font-size: 0.8rem;

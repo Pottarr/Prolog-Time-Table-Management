@@ -13,6 +13,8 @@
 // ---------- Edit these values ----------
 #let header = json("header.json")
 
+// Morning period 09–12, lunch, afternoon period 13–16. Columns are 1fr,
+// so these seven slots stretch to fill the page width.
 #let time-slots = (
   "09:00–10:00",
   "10:00–11:00",
@@ -21,23 +23,19 @@
   "13:00–14:00",
   "14:00–15:00",
   "15:00–16:00",
-  "16:00–17:00",
-  "17:00–18:00",
-  "18:00–19:00",
 )
-#let time-starts = range(9, 18)
+#let time-starts = range(9, 16)
 
 // Load all classes from schedule.csv.
 // CSV columns: room,day,start,span,title,prof,students
 // header.json: semester, academic_year, capacities (room -> seats).
-// Every unique room gets its own page.
-// `start` is the real starting hour (9–11 or 13–18); `span` is hours long.
+// Every room with classes gets its own page, in room order (ECC-801 first).
+// Rooms without classes — including ones not used for lectures — get none.
+// `start` is 9 (morning) or 13 (afternoon) and `span` is 3 hours.
 // Use three-letter day codes: Mon, Tue, Wed, Thu, Fri, Sat, Sun.
-// Example: HM-304,Mon,8,2,Software Engineering means 08:00–10:00.
+// Example: ECC-804,Mon,9,3,Software Engineering,... means 09:00–12:00.
 #let csv-rows = csv("schedule.csv", row-type: dictionary)
-#let rooms = csv-rows.fold((), (found, row) => {
-  if row.room in found { found } else { found + (row.room,) }
-})
+#let rooms = csv-rows.map(row => row.room).dedup().sorted()
 #let day-names = (
   "Monday",
   "Tuesday",
@@ -59,7 +57,7 @@
         let start-index = time-starts.position(hour => hour == start-hour)
         assert(
           start-index != none and start-hour != 12,
-          message: "CSV start must be 9–11 or 13–18; 12 is reserved for lunch.",
+          message: "CSV start must be 9–11 or 13–15; 12 is reserved for lunch.",
         )
         (
           start: start-index,
@@ -140,9 +138,9 @@
         colspan: block.span,
         fill: occupied-fill,
       )[
-        #text(weight: "medium", size: 7pt)[#block.title]
+        #text(weight: "medium", size: 9pt)[#block.title]
         #linebreak()
-        #text(fill: rgb("#555555"), size: 6.5pt)[#block.prof · #block.students students]
+        #text(fill: rgb("#555555"), size: 8pt)[#block.prof · #block.students students]
       ])
     }
   }
@@ -179,7 +177,7 @@
         x: index + 1,
         y: 0,
         fill: header-fill,
-      )[#text(fill: white, weight: "bold", size: 6.5pt)[#slot]]),
+      )[#text(fill: white, weight: "bold", size: 8.5pt)[#slot]]),
       ..schedule-cells(schedule),
     )
   ]
@@ -187,7 +185,7 @@
   v(4pt)
   align(right)[
     #text(size: 7pt, fill: rgb("#666666"))[
-      Yellow = occupied · Green = lunch · Dash = available
+      Grey = occupied · Darker grey = lunch · Dash = available
     ]
   ]
 }

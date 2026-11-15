@@ -24,12 +24,13 @@ uv run uvicorn app.main:app --reload --port 8000
 - `POST /api/schedule/pdf` — multipart form with:
   - `csv_file`: the schedule CSV (`room,day,start,span,title,prof,students`)
   - `config_file`: JSON with `semester`, `academic_year`, and `rooms`
-    (capacity of each of `ECC-801` … `ECC-810`) — see `app/schedule_config.py`
+    (capacity of each of `ECC-801` … `ECC-810`; `0` = not used for classes)
+    — see `app/schedule_config.py`
 
   Returns `application/pdf` on success, or a `422` with a JSON `detail`
   message on invalid input — e.g. a room that isn't one of the ten (see
-  `app/building.py`), a class that doesn't fit inside the morning
-  (09–12) or afternoon (13–16) period, two classes in one room's period,
+  `app/building.py`), a class that isn't exactly 3 hours starting at 9
+  (morning, 09–12) or 13 (afternoon, 13–16), two classes in one room's period,
   a professor teaching two classes in the same period, or more students
   than the room's capacity.
 - `POST /api/schedule/auto` — same two files, for an incomplete CSV.

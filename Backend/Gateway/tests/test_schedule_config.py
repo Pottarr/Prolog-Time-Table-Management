@@ -10,7 +10,8 @@ def test_sample_config_is_valid():
     config = parse_schedule_config((TEST_DATA_DIR / "config.json").read_bytes())
     assert config["semester"] == 1
     assert config["academic_year"] == 2026
-    assert config["capacities"]["ECC-808"] == 120
+    assert config["capacities"]["ECC-808"] == 100
+    assert config["capacities"]["ECC-806"] == 0  # co-working space
 
 
 def test_capacities_come_back_in_room_order():
@@ -53,7 +54,12 @@ def test_room_not_on_the_floor():
         parse_schedule_config(make_config(rooms=rooms))
 
 
-@pytest.mark.parametrize("capacity", [0, -5, 40.5, "40", None, True])
+def test_capacity_zero_marks_a_room_not_used_for_classes():
+    config = parse_schedule_config(make_config(rooms={**CAPACITIES, "ECC-801": 0}))
+    assert config["capacities"]["ECC-801"] == 0
+
+
+@pytest.mark.parametrize("capacity", [-5, 40.5, "40", None, True])
 def test_bad_capacity(capacity):
     rooms = {**CAPACITIES, "ECC-801": capacity}
     with pytest.raises(ConfigValidationError, match="ECC-801"):

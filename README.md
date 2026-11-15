@@ -7,6 +7,22 @@ with per-room weekly timetables and a printable PDF come out. Any room,
 day or time a professor left flexible is filled in by an SWI-Prolog
 CLP(FD) constraint solver.
 
+## Quick start (Docker)
+
+```bash
+# Build
+docker compose build
+
+# Run (then open http://localhost:9090)
+docker compose up -d
+
+# Test
+docker compose run --rm test
+
+# Stop
+docker compose down
+```
+
 ## Current status
 
 | Piece | State |
@@ -79,6 +95,19 @@ docker compose up -d --build
 Prolog runs inside the gateway container (`swipl` is installed in its
 image) — there's no separate Prolog container to wire in.
 
+Stop it with `docker compose down`.
+
+Run the test suite in Docker (same image as the gateway, so the same
+Python, `typst` and `swipl`; nothing to install locally):
+
+```bash
+docker compose run --rm test
+```
+
+The `test` service is in the `test` profile, so `docker compose up`
+never starts it. Extra pytest arguments go after `pytest`, e.g.
+`docker compose run --rm test uv run pytest -k capacity`.
+
 ### Option B: run each piece locally
 
 Gateway (needs the `typst` CLI and `swipl` on `PATH` — e.g.
@@ -102,6 +131,13 @@ npm run dev
 Open the URL Vite prints (typically http://localhost:5173) — its dev
 server proxies `/api/*` to `http://localhost:8000` automatically.
 
+Tests, run locally:
+
+```bash
+cd Backend/Gateway
+uv run pytest
+```
+
 ## Using the app
 
 1. Open the frontend.
@@ -117,16 +153,17 @@ server proxies `/api/*` to `http://localhost:8000` automatically.
 ### Config format
 
 A JSON file with the semester, academic year, and the seat capacity of
-every room (all ten must be listed, each a positive integer):
+every room (all ten must be listed, each a whole number of seats; `0`
+means the room isn't used for classes, like 806, the co-working space):
 
 ```json
 {
   "semester": 1,
   "academic_year": 2026,
   "rooms": {
-    "ECC-801": 40, "ECC-802": 40, "ECC-803": 40, "ECC-804": 40,
-    "ECC-805": 30, "ECC-806": 60, "ECC-807": 60, "ECC-808": 120,
-    "ECC-809": 120, "ECC-810": 40
+    "ECC-801": 50, "ECC-802": 50, "ECC-803": 50, "ECC-804": 50,
+    "ECC-805": 20, "ECC-806": 0, "ECC-807": 50, "ECC-808": 100,
+    "ECC-809": 100, "ECC-810": 50
   }
 }
 ```
@@ -143,8 +180,8 @@ room,day,start,span,title,prof,students
 |---|---|---|
 | `room` | Room name | One of the ECC 8th-floor rooms `ECC-801` … `ECC-810` |
 | `day` | Day of week | Three-letter code: `Mon`, `Tue`, `Wed`, `Thu`, `Fri`, `Sat`, `Sun` |
-| `start` | Starting hour (24h) | Must put the class inside one period (below) |
-| `span` | Length in hours | `1`–`3` |
+| `start` | Starting hour (24h) | `9` (morning) or `13` (afternoon) |
+| `span` | Length in hours | Always `3` |
 | `title` | Course name | Free text; optional notes in parentheses |
 | `prof` | Professor name | Free text |
 | `students` | Enrolled students | Positive integer, at most the room's capacity |
@@ -156,9 +193,9 @@ students.
 Rules enforced by the gateway:
 
 - **Periods** — each day has two periods, **morning 09:00–12:00** and
-  **afternoon 13:00–16:00**; a class must fit entirely inside one, and a
-  room holds at most one class per period (so at most two per day). A
-  shorter class still takes the whole period. 12:00–13:00 is lunch.
+  **afternoon 13:00–16:00**; every class is 3 hours and fills one whole
+  period, so it starts at 9 or 13. A room holds at most one class per
+  period (so at most two per day). 12:00–13:00 is lunch.
 - **Capacity** — `students` must not exceed the room's capacity from the
   config (equal is fine).
 - **Professor** — a professor teaches at most one class per period per
@@ -167,8 +204,10 @@ Rules enforced by the gateway:
   any detail in parentheses in the title, e.g. `Algorithms (Section 2)`.
   Quote the title if it contains a comma: `"Algorithms (Sec 2, English)"`.
 
-The timetable grid in the UI and PDF still shows 09:00–19:00; slots after
-16:00 simply stay empty.
+The timetable grid in the UI and PDF shows 09:00–16:00. The PDF has one
+page per room that has classes, in room order (ECC-801 first); a room
+with capacity 0 (806) gets no page, and in the UI it shows "Room not used
+for lectures" instead of a timetable.
 
 ### Auto-scheduling (incomplete CSVs)
 
@@ -203,10 +242,11 @@ re-checked by the same rules as a hand-written CSV before it's returned.
 `test/` has sample files for exercising the gateway directly:
 
 - **`test/config.json`** — semester, year, and room capacities
-  (808 and 809 are the 120-seat rooms). Placeholder capacities: replace
-  with the real ones.
+  — the real ECC 8th floor: big rooms 808/809 seat 100, small room 805
+  seats 20, 806 (co-working space) is 0 = not used for classes, and every
+  other room seats 50.
 - **`test/schedule-complete.csv`** — a fully-specified schedule (every
-  room/day/time filled in), including 100+-student classes in 808/809.
+  room/day/time filled in), including 95–100-student classes in 808/809.
   Use it against `/api/schedule/parse` or `/api/schedule/pdf`.
 - **`test/schedule-incomplete.csv`** — the same idea but with `room`,
   `day`, and/or `start` left as `NULL` on several rows, covering every

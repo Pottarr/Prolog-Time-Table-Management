@@ -142,7 +142,7 @@
     <pre class="hint-example">{`{
   "semester": 1,
   "academic_year": 2026,
-  "rooms": { "ECC-801": 40, "ECC-802": 40, …, "ECC-810": 40 }
+  "rooms": { "ECC-801": 50, …, "ECC-806": 0, …, "ECC-810": 50 }
 }`}</pre>
 
     <label class="checkbox-row">

@@ -7,19 +7,20 @@ TEST_DATA_DIR = Path(__file__).resolve().parents[3] / "test"
 
 HEADER = "room,day,start,span,title,prof,students"
 
-# Same capacities as test/config.json: 808/809 are the 120-seat rooms,
-# 805 is the smallest at 30.
+# Same capacities as test/config.json: 808/809 are the big 100-seat rooms,
+# 805 the small 20-seat one, 806 (the co-working space) isn't used for
+# classes, and every other room seats 50.
 CAPACITIES = {
-    "ECC-801": 40,
-    "ECC-802": 40,
-    "ECC-803": 40,
-    "ECC-804": 40,
-    "ECC-805": 30,
-    "ECC-806": 60,
-    "ECC-807": 60,
-    "ECC-808": 120,
-    "ECC-809": 120,
-    "ECC-810": 40,
+    "ECC-801": 50,
+    "ECC-802": 50,
+    "ECC-803": 50,
+    "ECC-804": 50,
+    "ECC-805": 20,
+    "ECC-806": 0,
+    "ECC-807": 50,
+    "ECC-808": 100,
+    "ECC-809": 100,
+    "ECC-810": 50,
 }
 
 

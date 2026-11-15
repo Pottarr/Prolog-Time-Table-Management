@@ -2,14 +2,14 @@ room,day,start,span,title,prof,students
 ECC-801,Sun,9,3,Engineering Mathematics (Section 1),Dr. Anan,40
 ECC-801,Sun,13,3,Engineering Mathematics (Section 2),Dr. Anan,38
 ECC-802,Mon,9,3,Computer Programming,Dr. Veera,40
-ECC-802,Mon,13,2,Programming Lab,Dr. Veera,35
-ECC-803,Tue,10,2,Digital Logic,Dr. Pipat,40
+ECC-802,Mon,13,3,Programming Lab,Dr. Veera,35
+ECC-803,Tue,9,3,Digital Logic,Dr. Pipat,40
 ECC-804,Tue,9,3,Data Structures,Dr. Isara,40
-ECC-805,Wed,9,3,Technical Writing,Dr. Natthapong,30
-ECC-806,Wed,13,3,Computer Networks,Dr. Visit,60
-ECC-807,Thu,9,1,Seminar,Dr. Suphamit,55
-ECC-807,Thu,13,3,Database Systems,Dr. Suphamit,60
-ECC-808,Fri,9,3,Discrete Mathematics,Dr. Anan,120
-ECC-809,Fri,13,3,Engineering Statistics,Dr. Isara,110
+ECC-805,Wed,9,3,Technical Writing,Dr. Natthapong,18
+ECC-803,Wed,13,3,Computer Networks,Dr. Visit,45
+ECC-807,Thu,9,3,Seminar,Dr. Suphamit,50
+ECC-807,Thu,13,3,Database Systems,Dr. Suphamit,48
+ECC-808,Fri,9,3,Discrete Mathematics,Dr. Anan,100
+ECC-809,Fri,13,3,Engineering Statistics,Dr. Isara,95
 ECC-810,Sat,9,3,"Algorithms (Section 3, English program)",Dr. Pipat,40
 ECC-810,Sat,13,3,Operating Systems,Dr. Visit,25
