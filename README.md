@@ -198,8 +198,9 @@ Rules enforced by the gateway:
   Quote the title if it contains a comma: `"Algorithms (Sec 2, English)"`.
 
 The timetable grid in the UI and PDF shows 09:00–16:00. The PDF has one
-page per room that has classes, in room order (ECC-801 first); a room
-with capacity 0 (806) gets no page, and in the UI it shows "Room not used
+page per classroom (capacity > 0), in room order (ECC-801 first), even
+when the room has no classes — so every lecture room gets a sheet for its
+door showing when it's free. A room with capacity 0 (806) gets no page, and in the UI it shows "Room not used
 for lectures" instead of a timetable.
 
 ### Auto-scheduling (incomplete CSVs)

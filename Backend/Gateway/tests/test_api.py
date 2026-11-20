@@ -5,6 +5,7 @@ skipped when it isn't installed.
 """
 
 import random
+import re
 import shutil
 
 import pytest
@@ -108,6 +109,16 @@ def test_pdf_sample():
     assert response.headers["content-type"] == "application/pdf"
     assert response.content.startswith(b"%PDF")
     assert 'filename="classroom-schedule-2026-s1.pdf"' in response.headers["content-disposition"]
+
+
+@needs_typst
+def test_pdf_has_a_page_for_every_classroom_even_empty_ones():
+    # One class in 801 only; every room with seats still gets a door sheet,
+    # but the co-working space (806, capacity 0) doesn't.
+    response = post("pdf", make_csv("ECC-801,Mon,9,3,A,Dr. X,10"), make_config())
+    assert response.status_code == 200, response.text
+    pages = re.findall(rb"/Type\s*/Page(?![s\w])", response.content)
+    assert len(pages) == sum(1 for seats in CAPACITIES.values() if seats > 0)
 
 
 @needs_typst

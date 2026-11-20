@@ -29,13 +29,19 @@
 // Load all classes from schedule.csv.
 // CSV columns: room,day,start,span,title,prof,students
 // header.json: semester, academic_year, capacities (room -> seats).
-// Every room with classes gets its own page, in room order (ECC-801 first).
-// Rooms without classes — including ones not used for lectures — get none.
+// Every room that can hold classes (capacity > 0) gets its own page, in room
+// order (ECC-801 first) — even with no classes, so the sheet on its door shows
+// it free. Rooms not used for lectures (capacity 0, e.g. 806) get none.
 // `start` is 9 (morning) or 13 (afternoon) and `span` is 3 hours.
 // Use three-letter day codes: Mon, Tue, Wed, Thu, Fri, Sat, Sun.
 // Example: ECC-804,Mon,9,3,Software Engineering,... means 09:00–12:00.
 #let csv-rows = csv("schedule.csv", row-type: dictionary)
-#let rooms = csv-rows.map(row => row.room).dedup().sorted()
+#let rooms = (
+  header.capacities.pairs()
+    .filter(((room, seats)) => seats > 0)
+    .map(((room, seats)) => room)
+    .sorted()
+)
 #let day-names = (
   "Monday",
   "Tuesday",
