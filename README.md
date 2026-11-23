@@ -27,9 +27,10 @@ docker compose down
 
 | Piece | State |
 |---|---|
-| Frontend (upload, floor plan, room timetables) | Working |
+| Frontend (upload, CSV editor, floor plan, ranked cases, room timetables) | Working |
 | Gateway (validation, JSON, PDF rendering) | Working |
 | Prolog auto-scheduling (`app/prolog/scheduler.pl`) | Working — fills blank room/day/start, or proves no timetable fits |
+| Several ranked / unsatisfied cases (`main_cases`) | Working — first N OK cases, or the ones with the fewest moved classes (see `Backend/Gateway/README.md`) |
 
 ## Architecture
 
@@ -136,12 +137,24 @@ uv run pytest
 1. Open the frontend.
 2. Choose a schedule CSV and a config JSON (see the formats below, and the
    samples in `test/`).
-3. Leave **auto-scheduling** unchecked for a complete CSV and press **Load
-   schedule**: the ECC 8th-floor plan appears — click any room to see its
-   weekly timetable, and use **Download summary PDF** for the printable
-   version (one page per room). Check it for an incomplete CSV: Prolog
-   fills in the blanks and the result is shown the same way, plus a
-   **Download completed CSV** link.
+3. Choosing the CSV opens the **editor** pop-up. The *Classes* tab edits
+   each row (room / day / period are dropdowns; **Any** = Prolog picks
+   it). The *Professors* tab sets a professor's general preference — a
+   day and/or morning/afternoon — and the gateway rewrites day/start on
+   all of their rows. Time clashes between fixed classes are flagged but
+   allowed.
+4. Set **Cases to return** (N; `0` = no cap, which also lifts the time
+   limit) and press **Save & run scheduler** (or **Run scheduler** in the
+   left rail; **Edit CSV** reopens the editor). The cases appear as tabs
+   on the right. A room/day/start in the CSV is what that class asks for;
+   rooms and professors are never double-booked. If every class can get
+   what it asked for you get the first N such cases (*OK*); otherwise the
+   first N *unsatisfied* ones, where some classes were moved to a free
+   spot — all cases with 1 moved class, then 2, and so on. Moved classes
+   are shown in red with what they asked for; *% satisfied* is the share
+   of classes that got it. Click a room on the floor plan to see
+   its week in the selected case, and export that case's CSV or summary
+   PDF (one page per room).
 
 ### Config format
 

@@ -1,19 +1,23 @@
 import csv
 import io
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 from app.building import BUILDING, FLOOR, PERIODS, ROOMS
+from app.cases import DEFAULT_CASES, apply_professor_preference, rank_cases
 from app.config import CORS_ALLOW_ORIGINS
 from app.csv_validation import (
     EXPECTED_COLUMNS,
     CsvValidationError,
     parse_partial_schedule_csv,
+    read_editable_rows,
+    rows_to_csv,
     validate_schedule_csv,
 )
-from app.prolog_engine import PrologError, generate_timetable
+from app.prolog_engine import PrologError, generate_cases, generate_timetable
 from app.schedule_config import ConfigValidationError, parse_schedule_config
 from app.typst_render import TypstCompileError, render_schedule_pdf
 
@@ -98,7 +102,8 @@ async def generate_schedule_pdf(
 
     Every row must already have room, day, and start filled in — for a
     CSV where professors left some of those blank, use
-    `/api/schedule/auto` first (its response carries the completed CSV).
+    `/api/schedule/auto` or `/api/schedule/cases` first (their responses
+    carry the completed CSV).
     """
     config = await _read_config(config_file)
     csv_bytes, _ = await _read_complete_schedule(csv_file, config)
@@ -170,3 +175,108 @@ async def generate_schedule_auto(
         )
 
     return {**_schedule_response(config, classes), "csv": completed_csv}
+
+
+@app.post("/api/schedule/cases")
+async def generate_schedule_cases(
+    csv_file: UploadFile = File(...),
+    config_file: UploadFile = File(...),
+    max_cases: int = Form(DEFAULT_CASES),
+) -> dict:
+    """Runs the scheduler and returns up to `max_cases` ranked timetables
+    (`max_cases <= 0`: no cap and no time limit — every case there is).
+
+    Like `/api/schedule/auto`, room/day/start may be blank or NULL — and a
+    given room/day/start is what that class *asks for*. Requests that
+    clash (a room or professor asked twice for one period) are accepted.
+    Rooms and professors are never double-booked in a case: if every
+    class can get what it asked for, only those (OK) cases come back;
+    otherwise *unsatisfied* ones, where some classes were moved to a free
+    spot — fewest moved classes first. Each case carries its `classes`,
+    completed `csv`, `unsatisfied` (the moved classes, with what they
+    asked for and got), `errors` (how many), `score` (0-100, % of classes
+    satisfied), `status` ("ok" / "unsatisfied") and `rank` (1 = best).
+    `complete` is false when the time limit cut the search short.
+    Capacity, room, day and format errors are still rejected with 422.
+    """
+    config = await _read_config(config_file)
+    capacities = config["capacities"]
+
+    try:
+        courses = parse_partial_schedule_csv(
+            await csv_file.read(), capacities, allow_clashes=True
+        )
+    except CsvValidationError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    try:
+        result = generate_cases(capacities, courses, max_cases)
+    except PrologError as exc:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"The Prolog scheduler failed: {exc}",
+        )
+    if result["status"] != "ok":
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=result["reason"])
+
+    cases = []
+    for case in result["cases"]:
+        # Same re-check as /auto: even an unsatisfied case must keep every
+        # hard rule (no double-booking, capacity).
+        completed_csv = _to_csv(case["assignments"])
+        try:
+            classes = validate_schedule_csv(completed_csv.encode(), capacities)
+        except CsvValidationError as exc:
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Prolog returned an invalid timetable: {exc}",
+            )
+        cases.append({"score": case["score"], "classes": classes, "csv": completed_csv})
+
+    schedule = _schedule_response(config, [])
+    del schedule["classes"]
+    return {
+        **schedule,
+        "max_cases": max(max_cases, 0),
+        "complete": result["complete"],
+        "cases": rank_cases(cases, courses),
+    }
+
+
+@app.post("/api/csv/rows")
+async def csv_rows(csv_file: UploadFile = File(...)) -> dict:
+    """The CSV's rows for the frontend's editor (only the header is checked)."""
+    try:
+        return {"rows": read_editable_rows(await csv_file.read())}
+    except CsvValidationError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+
+class EditorRow(BaseModel):
+    room: str | None = None
+    day: str | None = None
+    start: str | None = None
+    span: str | None = None
+    title: str | None = None
+    prof: str | None = None
+    students: str | None = None
+
+
+class ProfessorPreference(BaseModel):
+    rows: list[EditorRow]
+    prof: str
+    day: str = "keep"  # keep | any | Mon..Sun
+    period: str = "keep"  # keep | any | morning | afternoon
+
+
+@app.post("/api/csv/professor-preference")
+def professor_preference(body: ProfessorPreference) -> dict:
+    """Applies a professor's general preference (a day and/or a period) to
+    every one of their rows, and returns the rows plus the rewritten CSV."""
+    try:
+        rows = apply_professor_preference(
+            [row.model_dump() for row in body.rows], body.prof, body.day, body.period
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return {"rows": rows, "csv": rows_to_csv(rows)}

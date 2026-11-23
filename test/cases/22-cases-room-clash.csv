@@ -1,0 +1,5 @@
+room,day,start,span,title,prof,students
+ECC-804,Mon,9,3,Databases,Dr. Suphamit,40
+ECC-804,Mon,9,3,Software Design,Dr. Veera,35
+NULL,NULL,NULL,3,Algorithms,Dr. Pipat,30
+NULL,Tue,NULL,3,Linear Algebra,Dr. Kanya,48

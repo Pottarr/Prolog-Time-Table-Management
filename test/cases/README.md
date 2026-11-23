@@ -46,3 +46,20 @@ here, update that list too.
 | `15-auto-too-big-for-any-room.csv` | default | ❌ 150 students `don't fit in any room (largest capacity is 100)` |
 | `16-auto-fixed-clash.csv` | default | ❌ Dr. A fixed twice in Monday morning — one class at a time |
 | `19-auto-skips-806.csv` | default | ✅ 126 flexible classes fill all 9 class rooms × 14 periods exactly — nothing lands in 806 |
+
+## Several cases (the editor's **Save & run scheduler**)
+
+Pair with `test/config.json`. *Cases* is the cap N; `0` = no cap (no time
+limit either — only use it on small, mostly fixed files like 24).
+
+| File | Cases | Expected |
+|---|---|---|
+| `21-cases-several-ok.csv` | 10 | ✅ 10 OK cases (every class gets what it asked for). Mostly flexible, so there are far more — don't use no cap here |
+| `22-cases-room-clash.csv` | 10 | ⚠️ Two classes ask for ECC-804 Mon morning → 10 unsatisfied cases, 1 moved class each (one of the two goes to another room or time) |
+| `23-cases-prof-clash.csv` | 10 | ⚠️ Dr. Veera (spelled two ways) asks twice for Mon afternoon → 1 moved class each (one of the two goes to another period) |
+| `24-cases-error-levels.csv` | 10 | ⚠️ Three 95–100-student classes ask for Mon morning, only 808/809 fit → 1 moved class each (cases with 2 and 3 moved follow after all 1-moved ones — hundreds, so don't use no cap) |
+| `25-cases-mixed-errors.csv` | 10 | ⚠️ Dr. Kanya asks twice for ECC-801 Tue afternoon, Dr. Pipat twice for Wed morning → one class of each moves: 2 moved classes per case |
+| `26-cases-percent-levels.csv` + `config-one-room.json` | 30 | ⚠️ Different percentages in one run. Only ECC-801 has seats (14 periods); 14 classes ask for it, two of them for Mon morning, Sun afternoon is free → 2 cases with 1 moved class (92%), 24 with 2 moved (85%), 4 with 3 moved (78%). Cap 10 shows 92% and 85% |
+
+Rooms and professors are never double-booked in any case. *% satisfied*
+is the share of classes that got what they asked for.

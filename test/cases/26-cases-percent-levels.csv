@@ -1,0 +1,15 @@
+room,day,start,span,title,prof,students
+ECC-801,Mon,9,3,Databases,Dr. Suphamit,40
+ECC-801,Mon,9,3,Software Design,Dr. Veera,35
+ECC-801,Mon,13,3,Algorithms,Dr. Visit,45
+ECC-801,Tue,9,3,Operating Systems,Dr. Pipat,30
+ECC-801,Tue,13,3,Linear Algebra,Dr. Kanya,48
+ECC-801,Wed,9,3,Computer Networks,Dr. Anan,45
+ECC-801,Wed,13,3,Compiler Design,Dr. Isara,42
+ECC-801,Thu,9,3,Probability,Dr. Kanya,38
+ECC-801,Thu,13,3,Data Structures,Dr. Veera,50
+ECC-801,Fri,9,3,Machine Learning,Dr. Anan,50
+ECC-801,Fri,13,3,Statistics,Dr. Suphamit,40
+ECC-801,Sat,9,3,Discrete Mathematics,Dr. Visit,44
+ECC-801,Sat,13,3,Computer Architecture,Dr. Pipat,30
+ECC-801,Sun,9,3,Theory of Computation,Dr. Isara,36
