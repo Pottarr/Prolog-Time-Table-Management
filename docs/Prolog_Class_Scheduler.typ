@@ -82,43 +82,45 @@
   // ---------------------------------------------------------------- Project Description
   #section-title[Project Description]
 
-Prolog Time Table Management is a classroom timetabling system for the ten rooms on the 8th floor of the ECC building (ECC-801 to ECC-810). It builds a weekly timetable in which no room or professor is double-booked and every class has enough seats. Any room, day or start time a professor leaves open is chosen by a constraint solver written in SWI-Prolog.
+Prolog Time Table Management is a classroom timetabling system for the ten rooms on the 8th floor of the ECC building (ECC-801 to ECC-810). It builds weekly timetables with a constraint solver written in SWI-Prolog, which fills any room, day or start time a professor leaves open and resolves clashing requests.
 
 The user uploads a schedule CSV with one row per class (room, day, start, span, title, prof, students) and a config JSON with the semester, academic year and seat capacity of every room, where 0 marks a room not used for lectures, such as ECC-806. Each day has a morning period (09:00 to 12:00) and an afternoon period (13:00 to 16:00), and every class fills one whole period.
 
-Every timetable must satisfy these rules:
+The CSV opens in an editor. Its Classes tab edits each row, where "Any" leaves a room, day or period to Prolog, and its Professors tab applies a professor's preferred day or period to all their classes. Clashes are flagged but allowed.
+
+Every timetable must satisfy these hard rules:
 
 - A room holds at most one class per period.
 - A professor teaches at most one class per period.
 - The number of students never exceeds the room's capacity.
-- Rooms, days and start times fixed in the CSV are kept.
 
-With a complete CSV, the system checks the rules and reports the first row that breaks one. With auto-scheduling on, room, day and start may be blank or NULL, and Prolog fills every blank, giving each class the smallest room that fits and filling weekdays before the weekend. If no valid timetable exists, the user is told so.
+A room, day or start in the CSV is a request, not a fixed rule, and Prolog fills every blank, giving each class the smallest room that fits and filling weekdays before the weekend. Every CSV, complete or not, goes through the scheduler, which returns up to N timetables, called cases (10 by default, 0 for no limit). If every class can get what it asked for, only OK cases are returned, and a complete CSV without clashes gives exactly one. Otherwise it returns unsatisfied cases, with some classes moved to a free spot, fewest moved first. Only when moving classes cannot help, such as with more 100-student classes than big-room periods, is the user told no timetable exists. Invalid rows, such as an unknown room, are rejected with their row number.
 
-A Svelte frontend takes the uploads and shows a clickable floor plan with each room's weekly timetable. A FastAPI gateway validates the files, runs the Prolog solver as a subprocess and renders a PDF with one page per classroom. The solver's answer is checked again by the same validator before it is shown.
+A Svelte frontend has the editor, a tab per case with moved classes in red, and a clickable floor plan with each room's weekly timetable. A FastAPI gateway validates the files, runs Prolog as a subprocess, re-validates, scores and ranks the cases, and renders a PDF of the chosen case, one page per classroom.
 
   #pagebreak()
 
   // ---------------------------------------------------------------- AI Concepts
   #section-title[The AI Concepts to Apply in this Project]
 
-The auto-scheduler models timetabling as a #strong[Constraint Satisfaction Problem] (CSP) and solves it with SWI-Prolog's finite-domain constraint library, `library(clpfd)`. The model is in `scheduler.pl`, and the gateway's `prolog_engine.py` prepares its input and checks its output.
+The scheduler models timetabling as a #strong[Constraint Satisfaction Problem] (CSP) and solves it with SWI-Prolog's finite-domain constraint library, `library(clpfd)`. The model is in `scheduler.pl`, and the gateway's `prolog_engine.py` prepares its input and reads its output. `scheduler.pl` has two entry points that share one model: `main_cases`, which the web app uses and which returns several timetables, and `main_timetable`, which returns one.
 
 #subhead[Knowledge representation]
 
-The gateway encodes each course as an integer term `c(MinRoom, Prof, Room, Day, Period)`. Rooms are numbered in order of capacity, days 0 to 6 from Monday and periods 0 (morning) and 1 (afternoon). MinRoom is the smallest room that seats the class, and −1 means "Prolog picks". The sample CSV becomes one term, read with `read_term/3`, which parses data but never runs it:
+The gateway encodes each course as an integer term `c(MinRoom, Prof, Room, Day, Period)`. Rooms are numbered in order of capacity, days 0 to 6 from Monday and periods 0 (morning) and 1 (afternoon). MinRoom is the smallest room that seats the class, and −1 means "Prolog picks". Each professor gets a number, and names that differ only in case or spacing count as the same professor. The sample CSV becomes one term, read with `read_term/3`, which parses data but never runs it. The last two numbers are the time limit in seconds and the number of cases to return:
 
 ```erlang
 request([c(2,0,-1,-1,1), c(2,1,5,0,-1),
-         c(8,2,-1,4,-1), c(2,3,4,-1,-1)], 10, 10).
+         c(8,2,-1,4,-1), c(2,3,4,-1,-1)], 10, 10, 10).
 ```
 
 #subhead[CSP formulation]
 
 - #strong[Variables:] one Slot per class, where Slot = (Day × 2 + Period) × NumRooms + Room, so a single variable holds the room, day and period.
-- #strong[Domains:] the slots with a room from MinRoom upward that match any fixed room, day or period.
-- #strong[Constraints:] all slots differ, and each professor's times differ.
-- #strong[Goal:] the first assignment found in the preferred order. There is no objective function.
+- #strong[Domains:] the slots with a room from MinRoom upward that match the room, day or period the class asks for.
+- #strong[Hard constraints:] all slots differ, and each professor's times differ.
+- #strong[Soft constraints:] each class's requested room, day and period, set in the CSV or the editor. They stay in the domains while every request can be met, and are relaxed only when they cannot.
+- #strong[Goal:] up to N solutions that move the fewest classes off their requests: OK cases (none moved) if any exist, otherwise 1 moved class, then 2, and so on. Solutions with the same number of moved classes come in the preferred order.
 
 #subhead[Node consistency]
 
@@ -165,28 +167,80 @@ prof_free(_-Times) :- all_distinct(Times).
 - #strong[Variable order (ff):] the class with the fewest slots left goes first (minimum remaining values).
 - #strong[Value order:] lowest slot first, so each class gets the earliest period and the smallest room that fits.
 
+#subhead[Enumerating several solutions]
+
+`main_cases` runs the same search but does not stop at the first answer:
+
+```erlang
+forall(place(Courses, NumRooms, Placements),
+       emit_case(Placements, MaxCases))
+```
+
+`forall/2` prints each timetable as soon as it is found and then backtracks into `labeling/2` for the next one. The cases therefore come out in labeling order, and consecutive cases first differ in the class that was decided last. Once MaxCases timetables are printed, `emit_case/2` throws an exception that ends the search.
+
+#subhead[Soft constraints and relaxation]
+
+If no timetable meets every request, `relaxed_place/4` solves a relaxed problem with the same hard constraints:
+
+```erlang
+relaxed_place(Courses, NumRooms, Moved, Placements) :-
+    maplist(free_slot(NumRooms), Courses, Slots, ProfTimes, Flags),
+    all_distinct(Slots),
+    keysort(ProfTimes, Sorted),
+    group_pairs_by_key(Sorted, ByProf),
+    maplist(prof_free, ByProf),
+    sum(Flags, #=, Moved),
+    labeling([], Flags),
+    labeling([ff], Slots),
+    maplist(slot_placement(NumRooms), Slots, Placements).
+```
+
+`free_slot/5` gives each class every slot in a room big enough for it, plus a 0/1 variable Flag tied to its request by reification. Using only the fields the class asked for, it amounts to:
+
+```erlang
+Flag #<==> (Room #\= R #\/ Day #\= D #\/ Period #\= P)
+```
+
+`sum/3` makes exactly Moved flags equal to 1, and `main_cases` tries Moved = 1, then 2, 3 and so on, so the first cases always move the fewest classes possible. Labeling the flags first, 0 before 1, keeps classes in place where possible, and a flag of 0 narrows the slot back to the request by propagation. This is a Max-CSP: every hard constraint holds, and as many soft constraints as possible.
+
 #subhead[Completeness, time limit and verification]
 
-The cut in `solve/4` keeps the first solution. If labeling exhausts the search space, the answer is unsatisfiable, which proves no timetable fits. `call_with_time_limit/2` stops the search after 10 seconds. For the sample, Prolog prints "ok 2 0 1 5 0 0 8 4 0 4 0 0": Algorithms in ECC-801 on Monday afternoon, Databases and Operating Systems on Monday morning, and Compiler Design in ECC-808 on Friday morning. The gateway re-validates this answer before showing it.
+The search is complete. If even the fully relaxed problem has no solution, for example with more 100-student classes than big-room periods, the answer is unsatisfiable, which proves no timetable fits. `call_with_time_limit/2` stops the search after 10 seconds and keeps the cases found so far; with no case limit (N = 0) there is no time limit either. For the sample, the first case Prolog prints is "case -1 2 0 1 5 0 0 8 4 0 4 0 0": Algorithms in ECC-801 on Monday afternoon, Databases and Operating Systems on Monday morning, and Compiler Design in ECC-808 on Friday morning. When Databases and Software Design both ask for ECC-804 on Monday morning, every case moves exactly one class; in the first, Software Design moves to ECC-801. The gateway scores each case as the percentage of classes that got what they asked for, drops duplicates, ranks the cases by moved classes and re-validates each one.
 
   #pagebreak()
 
   // ---------------------------------------------------------------- Screen designs
   #section-title[Draft of Screen Design of your Program]
 
-#screen("Screen 1", "./images/screen1.png")
+#screen("Screen 1: Main Page", "./images/01_Main.png")
 
-#screen("Screen 2", "./images/screen2.png")
+#screen("Screen 2: Main Page when files got uploaded", "./images/02_Main_Uploaded.png")
 
-#screen("Screen 3", "./images/screen3.png")
+#screen("Screen 3: Ran Invalid Test with limit = 10, choice = 1, room capacity = 50", "./images/03_Ran_Invalid_N10_C1_S50.png")
 
-#screen("Screen 4", "./images/screen4.png")
+#screen("Screen 4: Ran Invalid Test with limit = 10, choice = 10, room capacity = 0", "./images/04_Ran_Invalid_N10_C10_S0.png")
 
-#screen("Screen 5", "./images/screen5.png")
+#screen("Screen 5: Ran Invalid Test with limit = 30, choice = 1, room capacity = 50", "./images/05_Ran_Invalid_N30_C1_S50.png")
 
-#screen("Screen 6", "./images/screen6.png")
+#screen("Screen 6: Ran Invalid Test with limit = 30, choice = 27, room capacity = 50", "./images/06_Ran_Invalid_N30_C27_S50.png")
+
+#screen("Screen 7: Ran Valid Test with limit = 10, choice = 1, room capacity = 100", "./images/07_Ran_Valid_N10_C1_S5.png")
+
+#screen("Screen 8: Ran Valid Test with limit = 5, choice = 1, room capacity = 100", "./images/08_Ran_Valid_N5_C1_S100.png")
+
+#screen("Screen 9: Ran Valid Test with limit = 5, choice = 1, room capacity = 0", "./images/09_Ran_Valid_N5_C1_S0.png")
+
+#screen("Screen 10: CSV Editor Page", "./images/10_CSV_Editor.png")
+
+#screen("Screen 11: Constraints Editor Initially", "./images/11_Constraint_Editor_Before.png")
+
+#screen("Screen 12: Constraints Editor After Edit", "./images/12_Constrain_Editor_After.png")
+
+#screen("Screen 13: Constraints Editor Toggling to show Professor's classes", "./images/13_Constraint_Editor_Show_Classes.png")
+
+#screen("Screen 14: Preview of Output PDF of the Valid Case", "./images/14_Output_Valid_PDF.png")
 ]
 
 // ------------------------------------------------------------------ Appendix
-#include "./Codebase.typ"
 #include "./Test.typ"
+#include "./Codebase.typ"
