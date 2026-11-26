@@ -215,7 +215,9 @@ def _normalize_optional(value: str | None) -> str | None:
     return stripped
 
 
-def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[dict]:
+def parse_partial_schedule_csv(
+    raw: bytes, capacities: dict[str, int], *, allow_clashes: bool = False
+) -> list[dict]:
     """Parse a schedule CSV for auto-scheduling.
 
     Unlike `validate_schedule_csv`, `room`, `day`, and `start` may each be
@@ -230,7 +232,9 @@ def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[d
     both day and start, its professor must not already be teaching
     another fixed class in that period, and if it fixes the room too, that
     room must be free in that period (rows left flexible are Prolog's to
-    keep apart).
+    keep apart). With `allow_clashes=True` those two clash checks are
+    skipped: the requests may clash, and the multi-case scheduler moves
+    classes to resolve it ("unsatisfied" cases).
 
     Returns one dict per row (room/day/start possibly None, span/students
     ints, title/prof strings) — this is the per-course shape consumed by
@@ -287,7 +291,7 @@ def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[d
                     f"Row {line_no}: 'start' must be blank/NULL or an integer."
                 )
             period = _check_start(start, line_no)
-            if day is not None:
+            if day is not None and not allow_clashes:
                 _check_prof_free(teaching, prof, day, period, line_no)
                 if room is not None:
                     _check_room_free(booked, room, day, period, line_no)
@@ -308,3 +312,30 @@ def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[d
         raise CsvValidationError("CSV has no data rows.")
 
     return courses
+
+
+def read_editable_rows(raw: bytes) -> list[dict]:
+    """The CSV's rows as plain strings, for the frontend's editor.
+
+    Only the header is checked: the editor is where a broken row gets
+    fixed, so nothing else is rejected here. Blank and "NULL" cells come
+    back as None.
+    """
+    reader = _read_rows(raw)
+    return [
+        {column: _normalize_optional(row.get(column)) for column in EXPECTED_COLUMNS}
+        for row in reader
+    ]
+
+
+def rows_to_csv(rows: list[dict]) -> str:
+    """Writes editor rows (None or "" = flexible) back to a schedule CSV."""
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(EXPECTED_COLUMNS)
+    for row in rows:
+        writer.writerow(
+            "NULL" if row.get(column) in (None, "") else str(row[column]).strip()
+            for column in EXPECTED_COLUMNS
+        )
+    return out.getvalue()

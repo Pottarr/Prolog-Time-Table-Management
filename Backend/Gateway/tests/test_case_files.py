@@ -4,13 +4,17 @@ the outcome documented for it in `test/cases/README.md`.
 Keep the two in sync: adding a file there means adding a row here.
 """
 
+import shutil
+from collections import Counter
+
 import pytest
 
 from tests.conftest import TEST_DATA_DIR
-from tests.test_api import post
+from tests.test_api import client, post
 
 CASES_DIR = TEST_DATA_DIR / "cases"
 DEFAULT_CONFIG = TEST_DATA_DIR / "config.json"
+needs_swipl = pytest.mark.skipif(shutil.which("swipl") is None, reason="swipl not installed")
 
 # (csv file, config file or None for test/config.json, endpoint, status, expected text)
 CASES = [
@@ -53,7 +57,37 @@ def test_case_file(csv_name, config_name, endpoint, status, expected):
         assert expected in response.json()["detail"]
 
 
+# Several cases (/api/schedule/cases): csv, config (None = test/config.json),
+# cap, and the expected {moved classes: number of cases}.
+MULTI_CASES = [
+    ("21-cases-several-ok.csv", None, 10, {0: 10}),
+    ("22-cases-room-clash.csv", None, 10, {1: 10}),
+    ("23-cases-prof-clash.csv", None, 10, {1: 10}),
+    ("24-cases-error-levels.csv", None, 10, {1: 10}),
+    ("25-cases-mixed-errors.csv", None, 10, {2: 10}),
+    ("26-cases-percent-levels.csv", "config-one-room.json", 30, {1: 2, 2: 24, 3: 4}),
+]
+
+
+@needs_swipl
+@pytest.mark.parametrize("csv_name,config_name,cap,levels", MULTI_CASES, ids=[c[0] for c in MULTI_CASES])
+def test_multi_case_file(csv_name, config_name, cap, levels):
+    config_path = CASES_DIR / config_name if config_name else DEFAULT_CONFIG
+    response = client.post(
+        "/api/schedule/cases",
+        files={
+            "csv_file": ("s.csv", (CASES_DIR / csv_name).read_bytes(), "text/csv"),
+            "config_file": ("c.json", config_path.read_bytes(), "application/json"),
+        },
+        data={"max_cases": str(cap)},
+    )
+    assert response.status_code == 200, response.text
+    cases = response.json()["cases"]
+    assert dict(Counter(c["errors"] for c in cases)) == levels
+    assert [c["errors"] for c in cases] == sorted(c["errors"] for c in cases)
+
+
 def test_every_case_file_is_covered():
-    used = {c[0] for c in CASES} | {c[1] for c in CASES if c[1]}
+    used = {c[0] for c in CASES} | {c[1] for c in CASES if c[1]} | {c[0] for c in MULTI_CASES} | {c[1] for c in MULTI_CASES if c[1]}
     on_disk = {p.name for p in CASES_DIR.iterdir() if p.suffix in (".csv", ".json")}
     assert on_disk == used

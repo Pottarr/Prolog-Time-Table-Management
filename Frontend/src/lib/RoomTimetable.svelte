@@ -3,8 +3,10 @@
   // 09:00–12:00 | lunch | afternoon 13:00–16:00). Every class fills exactly
   // one period (the gateway enforces that), so one cell = one class. The
   // grid stretches to the height it's given, and long titles shrink and
-  // clamp instead of making the page scroll.
-  let { room, capacity, classes = [] } = $props();
+  // clamp instead of making the page scroll. `flagged` maps a class's
+  // index to why it's flagged (in an unsatisfied case: a class that didn't
+  // get what it asked for); those are tinted red.
+  let { room, capacity, classes = [], flagged = new Map() } = $props();
 
   const DAYS = [
     ['Mon', 'Monday'],
@@ -18,7 +20,13 @@
   const WEEKEND = new Set(['Sat', 'Sun']);
 
   const byDayStart = $derived(
-    new Map(classes.filter((c) => c.room === room).map((c) => [`${c.day}-${c.start}`, c])),
+    classes.reduce((cells, c, i) => {
+      if (c.room !== room) return cells;
+      const key = `${c.day}-${c.start}`;
+      if (!cells.has(key)) cells.set(key, []);
+      cells.get(key).push({ ...c, note: flagged.get(i) ?? null });
+      return cells;
+    }, new Map()),
   );
 </script>
 
@@ -39,16 +47,20 @@
           {#if start === null}
             <span class="lunch" role="cell" aria-label="Lunch"></span>
           {:else}
-            {@const lesson = byDayStart.get(`${code}-${start}`)}
+            {@const lessons = byDayStart.get(`${code}-${start}`) ?? []}
             <span class="cell" role="cell">
-              {#if lesson}
-                <span class="class" title="{lesson.title} — {lesson.prof}, {lesson.students} / {capacity} seats">
+              {#each lessons as lesson, j (j)}
+                <span
+                  class="class"
+                  class:clash={lesson.note || lessons.length > 1}
+                  title={lesson.note ?? `${lesson.title} — ${lesson.prof}, ${lesson.students} / ${capacity} seats`}
+                >
                   <b>{lesson.title}</b>
-                  <span class="meta">{lesson.prof} · {lesson.students} / {capacity} seats</span>
+                  <span class="meta">{lesson.note ? 'Moved · ' : ''}{lesson.prof} · {lesson.students} / {capacity} seats</span>
                 </span>
               {:else}
                 <span class="free">Free</span>
-              {/if}
+              {/each}
             </span>
           {/if}
         {/each}
@@ -121,7 +133,12 @@
     overflow: hidden;
   }
 
+  .cell {
+    gap: 0.6em;
+  }
+
   .class {
+    flex: 1 1 0;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -138,6 +155,16 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+
+  .class.clash {
+    border-left-color: var(--error);
+    background: rgba(155, 44, 44, 0.07);
+    padding-right: 0.4em;
+  }
+
+  .class.clash .meta {
+    color: var(--error);
   }
 
   .meta {

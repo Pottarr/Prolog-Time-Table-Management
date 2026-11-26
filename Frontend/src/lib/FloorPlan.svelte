@@ -9,7 +9,9 @@
   // left as they are and aren't clickable.
   import floorPlanSvg from './ecc-8th-floor.svg?raw';
 
-  let { classes = [], capacities = null, selectedRoom = null, onselect } = $props();
+  // `flaggedRooms`: rooms holding a class that didn't get what it asked
+  // for in the case on screen (drawn red).
+  let { classes = [], capacities = null, selectedRoom = null, flaggedRooms = new Set(), onselect } = $props();
 
   const WIDTH = 814;
   const HEIGHT = 499;
@@ -34,13 +36,14 @@
       'room',
       !loaded ? 'idle' : unused ? 'unused' : count > 0 ? 'booked' : 'empty',
       room === selectedRoom ? 'selected' : '',
+      flaggedRooms.has(room) ? 'clash' : '',
     ].join(' ');
     const sub = !loaded ? '' : unused ? 'not used' : count === 0 ? 'free' : `${count} class${count === 1 ? '' : 'es'}`;
     const label = !loaded
       ? room
       : unused
         ? `${room}: not used for lectures`
-        : `${room}: ${capacities[room]} seats, ${count === 0 ? 'no classes' : sub}`;
+        : `${room}: ${capacities[room]} seats, ${count === 0 ? 'no classes' : sub}${flaggedRooms.has(room) ? ', has a moved class' : ''}`;
     // In the turned plan, "up" on screen is towards smaller x in the
     // original drawing, so the number sits at x - 10 and the count at x + 14.
     const nx = Number(x) - (sub ? 10 : 0);
@@ -161,6 +164,16 @@
 
   .plan :global(.room.booked .sub) {
     fill: var(--accent);
+  }
+
+  .plan :global(.room.clash .num),
+  .plan :global(.room.clash .sub) {
+    fill: var(--error);
+  }
+
+  .plan :global(.room.clash rect) {
+    stroke: var(--error);
+    stroke-width: 3;
   }
 
   .plan :global(.room.unused rect) {

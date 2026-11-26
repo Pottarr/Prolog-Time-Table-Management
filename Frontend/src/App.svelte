@@ -2,54 +2,58 @@
   import { API_BASE } from './config.js';
   import FloorPlan from './lib/FloorPlan.svelte';
   import RoomTimetable from './lib/RoomTimetable.svelte';
+  import ScheduleEditor from './lib/ScheduleEditor.svelte';
+  import { ROOMS as FLOOR_ROOMS, rowsToCsv } from './lib/schedule.js';
 
-  // The floor's rooms, so the plan and room tabs can be drawn before any
-  // schedule is loaded (the gateway sends the same list back with it).
-  const FLOOR_ROOMS = Array.from({ length: 10 }, (_, i) => `ECC-8${String(i + 1).padStart(2, '0')}`);
   const PERIODS_PER_WEEK = 14; // 7 days × morning/afternoon
+  const SHOWN_MOVED = 2; // moved classes listed in the case strip before "+N more"
 
   let csvFile = $state(null);
   let configFile = $state(null);
-  let autoSchedule = $state(false);
+  // The CSV as editable rows (from /api/csv/rows); the editor changes
+  // these and every scheduler run sends them back as a CSV.
+  let rows = $state(null);
+  let editorOpen = $state(false);
+  let justUploaded = $state(false);
+  let editorError = $state('');
+  let maxCases = $state(10);
+
   let status = $state('idle'); // idle | loading | error | done
   let errorMessage = $state('');
-  // The schedule on screen (from /api/schedule/parse, or solved by Prolog
-  // via /api/schedule/auto) plus the complete CSV + config it came from, so
-  // the PDF download matches what's on screen even if the form is changed
-  // afterwards. For auto-scheduling that CSV is Prolog's completed one.
-  let schedule = $state(null);
-  let submitted = $state(null);
-  let completedCsvUrl = $state('');
+  // The scheduler's answer (/api/schedule/cases): ranked cases, best first,
+  // plus the config they were made with so the PDF always matches.
+  let result = $state(null);
+  let resultConfig = $state(null);
+  let selectedRank = $state(1);
   let selectedRoom = $state(null);
   let pdfStatus = $state('idle'); // idle | loading | error
   let pdfError = $state('');
 
-  const rooms = $derived(schedule?.rooms ?? FLOOR_ROOMS);
-  const capacity = $derived(schedule && selectedRoom ? schedule.capacities[selectedRoom] : null);
-  const roomCount = $derived(
-    schedule && selectedRoom ? schedule.classes.filter((c) => c.room === selectedRoom).length : 0,
+  const cases = $derived(result?.cases ?? []);
+  const current = $derived(cases.find((c) => c.rank === selectedRank) ?? cases[0] ?? null);
+  const classes = $derived(current?.classes ?? []);
+  // Tab groups: OK, then by how many classes didn't get what they asked for.
+  const caseGroups = $derived(
+    cases.reduce((groups, c) => {
+      const label = c.errors === 0 ? 'OK' : `${c.errors} unsatisfied`;
+      const last = groups.at(-1);
+      if (last?.label === label) last.cases.push(c);
+      else groups.push({ label, bad: c.errors > 0, cases: [c] });
+      return groups;
+    }, []),
   );
+  const uncapped = $derived(Number(maxCases) <= 0);
+  // Classes the case moved off what they asked for: row index -> message.
+  const moved = $derived(new Map(current?.unsatisfied.map((u) => [u.row, u.message]) ?? []));
+  const movedRooms = $derived(new Set([...moved.keys()].map((i) => classes[i].room)));
+
+  const rooms = $derived(result?.rooms ?? FLOOR_ROOMS);
+  const capacity = $derived(result && selectedRoom ? result.capacities[selectedRoom] : null);
+  const roomCount = $derived(selectedRoom ? classes.filter((c) => c.room === selectedRoom).length : 0);
   const fileBase = $derived(
-    schedule ? `classroom-schedule-${schedule.academic_year}-s${schedule.semester}` : '',
+    result ? `classroom-schedule-${result.academic_year}-s${result.semester}-case${current?.rank ?? 1}` : '',
   );
-
-  function resetResult() {
-    status = 'loading';
-    errorMessage = '';
-    schedule = null;
-    if (completedCsvUrl) URL.revokeObjectURL(completedCsvUrl);
-    completedCsvUrl = '';
-    submitted = null;
-    pdfStatus = 'idle';
-    pdfError = '';
-  }
-
-  function buildFormData({ file, config }) {
-    const formData = new FormData();
-    formData.append('csv_file', file);
-    formData.append('config_file', config);
-    return formData;
-  }
+  const canRun = $derived(Boolean(rows && configFile));
 
   async function errorFromResponse(response) {
     const body = await response.json().catch(() => null);
@@ -57,94 +61,139 @@
     return new Error(detail ?? `Request failed with status ${response.status}`);
   }
 
-  async function downloadPdf() {
-    pdfStatus = 'loading';
-    pdfError = '';
-    try {
-      const response = await fetch(`${API_BASE}/api/schedule/pdf`, {
-        method: 'POST',
-        body: buildFormData(submitted),
-      });
-      if (!response.ok) throw await errorFromResponse(response);
+  const messageOf = (err) => (err instanceof Error ? err.message : String(err));
 
-      const url = URL.createObjectURL(await response.blob());
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${fileBase}.pdf`;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 0);
-      pdfStatus = 'idle';
+  // A new CSV: read it into rows and open the editor straight away.
+  async function chooseCsv(file) {
+    if (!file) return;
+    csvFile = file;
+    const formData = new FormData();
+    formData.append('csv_file', file);
+    try {
+      const response = await fetch(`${API_BASE}/api/csv/rows`, { method: 'POST', body: formData });
+      if (!response.ok) throw await errorFromResponse(response);
+      rows = (await response.json()).rows;
+      editorError = '';
+      justUploaded = true;
+      editorOpen = true;
     } catch (err) {
-      pdfStatus = 'error';
-      pdfError = err instanceof Error ? err.message : String(err);
+      rows = null;
+      status = 'error';
+      errorMessage = messageOf(err);
     }
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  // 0 or less = no cap (every case, no time limit).
+  function clampCases() {
+    const n = Math.round(Number(maxCases));
+    maxCases = Number.isFinite(n) ? Math.max(0, n) : 10;
+  }
 
-    if (!csvFile || !configFile) {
-      status = 'error';
-      errorMessage = 'Choose both a schedule CSV and a config JSON file first.';
-      return;
-    }
+  async function runScheduler({ fromEditor = false } = {}) {
+    if (!canRun) return;
+    clampCases();
+    status = 'loading';
+    errorMessage = '';
+    editorError = '';
 
-    resetResult();
-
-    const inputs = { file: csvFile, config: configFile };
-    const endpoint = autoSchedule ? '/api/schedule/auto' : '/api/schedule/parse';
+    const formData = new FormData();
+    formData.append('csv_file', new Blob([rowsToCsv(rows)], { type: 'text/csv' }), csvFile?.name ?? 'schedule.csv');
+    formData.append('config_file', configFile);
+    formData.append('max_cases', String(maxCases));
 
     try {
-      const response = await fetch(`${API_BASE}${endpoint}`, {
-        method: 'POST',
-        body: buildFormData(inputs),
-      });
-
+      const response = await fetch(`${API_BASE}/api/schedule/cases`, { method: 'POST', body: formData });
       if (!response.ok) throw await errorFromResponse(response);
-
-      schedule = await response.json();
-      if (schedule.csv) {
-        const completed = new Blob([schedule.csv], { type: 'text/csv' });
-        submitted = { file: completed, config: inputs.config };
-        completedCsvUrl = URL.createObjectURL(completed);
-      } else {
-        submitted = inputs;
-      }
-      // Keep the room the user was looking at; otherwise open on the
-      // busiest room so the page never starts with an empty week.
-      if (!selectedRoom || !schedule.rooms.includes(selectedRoom)) {
-        const counts = schedule.classes.reduce(
-          (acc, c) => acc.set(c.room, (acc.get(c.room) ?? 0) + 1),
-          new Map(),
-        );
-        selectedRoom = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? schedule.rooms[0];
-      }
+      result = await response.json();
+      resultConfig = configFile;
+      pdfStatus = 'idle';
+      pdfError = '';
+      selectCase(1);
       status = 'done';
+      editorOpen = false;
+      justUploaded = false;
     } catch (err) {
-      status = 'error';
-      errorMessage = err instanceof Error ? err.message : String(err);
+      if (fromEditor) {
+        editorError = messageOf(err);
+        // Keep whatever was on screen before this run.
+        status = result ? 'done' : 'idle';
+      } else {
+        status = 'error';
+        errorMessage = messageOf(err);
+      }
+    }
+  }
+
+  function saveEdits(edited) {
+    rows = edited;
+    if (configFile) runScheduler({ fromEditor: true });
+    else {
+      editorOpen = false;
+      justUploaded = false;
+    }
+  }
+
+  function selectCase(rank) {
+    selectedRank = rank;
+    if (pdfStatus === 'error') pdfStatus = 'idle'; // an old case's PDF error
+    const shown = cases.find((c) => c.rank === rank)?.classes ?? [];
+    // Keep the room the user was looking at; otherwise open on the
+    // busiest room so the page never starts with an empty week.
+    if (!selectedRoom || !result.rooms.includes(selectedRoom)) {
+      const counts = shown.reduce((acc, c) => acc.set(c.room, (acc.get(c.room) ?? 0) + 1), new Map());
+      selectedRoom = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? result.rooms[0];
     }
   }
 
   function selectRoom(room) {
-    if (schedule) selectedRoom = room;
+    if (result) selectedRoom = room;
+  }
+
+  function saveFile(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function downloadCsv() {
+    saveFile(new Blob([current.csv], { type: 'text/csv' }), `${fileBase}.csv`);
+  }
+
+  async function downloadPdf() {
+    pdfStatus = 'loading';
+    pdfError = '';
+    const formData = new FormData();
+    formData.append('csv_file', new Blob([current.csv], { type: 'text/csv' }), 'schedule.csv');
+    formData.append('config_file', resultConfig);
+    try {
+      const response = await fetch(`${API_BASE}/api/schedule/pdf`, { method: 'POST', body: formData });
+      if (!response.ok) throw await errorFromResponse(response);
+      saveFile(await response.blob(), `${fileBase}.pdf`);
+      pdfStatus = 'idle';
+    } catch (err) {
+      pdfStatus = 'error';
+      pdfError = messageOf(err);
+    }
   }
 </script>
 
 <div class="app">
-  <!-- Left rail: inputs, the floor plan, exports -->
+  <!-- Left rail: inputs, the floor plan -->
   <aside class="rail">
     <div class="brand">
       <div class="logo" aria-hidden="true"><span>8F</span></div>
       <div class="lbl">
         ECC timetable
         <span class="dim">
-          {schedule ? `Semester ${schedule.semester} · ${schedule.academic_year}` : '8th floor · 801 – 810'}
+          {result ? `Semester ${result.semester} · ${result.academic_year}` : '8th floor · 801 – 810'}
         </span>
       </div>
     </div>
 
-    <form class="inputs" onsubmit={handleSubmit}>
+    <div class="inputs">
       <div class="step-head">
         <span class="lbl"><span class="n">1</span> Files</span>
         <details class="help">
@@ -153,10 +202,12 @@
             <p class="lbl">Schedule CSV</p>
             <pre>room,day,start,span,title,prof,students
 ECC-804,Mon,9,3,Software Design,Dr. Veera,35
-ECC-808,Mon,13,3,Discrete Mathematics,Dr. Visit,100</pre>
+NULL,NULL,13,3,Algorithms,Dr. Visit,100</pre>
             <p>
               <code>day</code> is Mon – Sun · <code>start</code> is 9 (morning) or 13 (afternoon) ·
-              <code>span</code> is always 3 · <code>students</code> can't exceed the room's seats.
+              <code>span</code> is always 3 · <code>students</code> can't exceed the room's seats. Leave
+              <code>room</code>, <code>day</code> or <code>start</code> blank (or <code>NULL</code>) and Prolog
+              picks it. The editor opens as soon as you choose a CSV.
             </p>
 
             <p class="lbl">Config JSON</p>
@@ -172,19 +223,26 @@ ECC-808,Mon,13,3,Discrete Mathematics,Dr. Visit,100</pre>
 }`}</pre>
             <p>Seats for all ten rooms; <code>0</code> = not used for lectures (806 is the co-working space).</p>
 
-            <p class="lbl">Auto-schedule</p>
-            <pre>NULL,NULL,13,3,Algorithms,Dr. Veera,35
-ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
+            <p class="lbl">Cases</p>
             <p>
-              Leave <code>room</code>, <code>day</code> or <code>start</code> blank (or <code>NULL</code>)
-              and Prolog fills them in. The first row means "any day, any room, starts 13:00"; the
-              second "room 804 on Monday, any time".
+              The scheduler returns the first <em>Cases</em> timetables (<code>0</code> = no cap: every case, however
+              long it takes). A room, day or start in the CSV is what that class asks for; rooms and professors
+              are never double-booked. If every class can get what it asked for, only those (OK) cases are shown.
+              Otherwise you get <em>unsatisfied</em> ones — some classes moved to a free spot — fewest moved
+              classes first.
             </p>
           </div>
         </details>
       </div>
       <label class="file" class:set={csvFile}>
-        <input type="file" accept=".csv,text/csv" onchange={(e) => (csvFile = e.target.files?.[0] ?? null)} />
+        <input
+          type="file"
+          accept=".csv,text/csv"
+          onchange={(e) => {
+            chooseCsv(e.target.files?.[0] ?? null);
+            e.target.value = '';
+          }}
+        />
         <span class="name">{csvFile?.name ?? 'Choose schedule CSV'}</span>
         <span class="act lbl">{csvFile ? 'Change' : 'Browse'}</span>
       </label>
@@ -194,64 +252,76 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
         <span class="act lbl">{configFile ? 'Change' : 'Browse'}</span>
       </label>
 
+      <div class="step-head">
+        <span class="lbl"><span class="n">2</span> Schedule</span>
+      </div>
+      <label class="cap-row">
+        <span class="lbl">Cases to return <span class="dim">{uncapped ? 'no cap — every case' : '0 = no cap'}</span></span>
+        <input class="num" type="number" min="0" bind:value={maxCases} onchange={clampCases} />
+      </label>
       <div class="load-row">
-        <label class="toggle" title="Leave room, day or start blank (or NULL) and Prolog fills them in">
-          <input type="checkbox" bind:checked={autoSchedule} />
-          <span class="track" aria-hidden="true"></span>
-          Auto-schedule
-        </label>
-        <button class="btn" type="submit" disabled={status === 'loading'}>
-          {#if status === 'loading'}
-            {autoSchedule ? 'Scheduling…' : 'Loading…'}
-          {:else}
-            <span class="n">2</span> Load
-          {/if}
+        <button class="btn ghost" type="button" disabled={!rows} onclick={() => ((justUploaded = false), (editorOpen = true))}>
+          Edit CSV
+        </button>
+        <button class="btn" type="button" disabled={!canRun || status === 'loading'} onclick={() => runScheduler()}>
+          {status === 'loading' ? 'Scheduling…' : 'Run scheduler'}
         </button>
       </div>
-    </form>
+    </div>
 
     <div class="plan">
       <FloorPlan
-        classes={schedule?.classes ?? []}
-        capacities={schedule?.capacities ?? null}
-        selectedRoom={schedule ? selectedRoom : null}
+        {classes}
+        capacities={result?.capacities ?? null}
+        selectedRoom={result ? selectedRoom : null}
+        flaggedRooms={movedRooms}
         onselect={selectRoom}
       />
     </div>
   </aside>
 
-  <!-- Main: the selected room's week -->
+  <!-- Main: the selected room's week in the selected case -->
   <main class="main">
-    {#if status === 'done' && schedule && selectedRoom}
+    {#if result && current && selectedRoom}
       <header class="room-head">
         <h1 class="big">{selectedRoom.slice(4)}</h1>
         <div class="facts">
           <div class="lbl">ECC · {capacity === 0 ? 'Co-working space' : 'Classroom'}</div>
           <div class="seats">{capacity === 0 ? 'Not used for lectures' : `${capacity} seats`}</div>
           {#if capacity !== 0}
-            <div class="dim">{roomCount} class{roomCount === 1 ? '' : 'es'} · {roomCount * 3} h / week</div>
+            <div class="dim">
+              {roomCount} class{roomCount === 1 ? '' : 'es'} · {Math.round((roomCount / PERIODS_PER_WEEK) * 100)}% of
+              periods
+            </div>
           {/if}
         </div>
         <div class="readout">
-          <div><b>{schedule.classes.length}</b><small>Classes on floor</small></div>
-          <div>
-            <b>{capacity === 0 ? '—' : `${Math.round((roomCount / PERIODS_PER_WEEK) * 100)}%`}</b>
-            <small>Periods used</small>
-          </div>
+          <div><b>{current.rank}<span class="of"> / {cases.length}</span></b><small>Rank</small></div>
+          <div><b class:err={current.status !== 'ok'}>{current.score}%</b><small>Satisfied</small></div>
+          <div><b class:err={current.errors}>{current.errors}</b><small>Unsatisfied</small></div>
         </div>
       </header>
+      {#if current.status !== 'ok'}
+        <div class="casebar" title={current.unsatisfied.map((u) => u.message).join('\n')}>
+          <span class="tag">Case {current.rank} · {current.errors} unsatisfied</span>
+          <ul>
+            {#each current.unsatisfied.slice(0, SHOWN_MOVED) as u (u.row)}<li>{u.message}</li>{/each}
+          </ul>
+          {#if current.unsatisfied.length > SHOWN_MOVED}
+            <span class="more">+{current.unsatisfied.length - SHOWN_MOVED} more</span>
+          {/if}
+        </div>
+      {/if}
       <div class="sect">
         <span class="lbl">
           Weekly timetable — {selectedRoom}
-          {#if completedCsvUrl}<span class="dim"> · scheduled by Prolog</span>{/if}
+          <span class="dim"> · case {current.rank}, scheduled by Prolog</span>
         </span>
         <span class="exports">
           <span class="lbl"><span class="n">3</span> Export</span>
-          {#if completedCsvUrl}
-            <a class="btn ghost small" href={completedCsvUrl} download="{fileBase}.csv">Completed CSV</a>
-          {/if}
+          <button class="btn ghost small" type="button" onclick={downloadCsv} title="Download case {current.rank} as a CSV">Case {current.rank} CSV</button>
           <button class="btn small" type="button" onclick={downloadPdf} disabled={pdfStatus === 'loading'}>
-            {pdfStatus === 'loading' ? 'Rendering…' : 'Summary PDF'}
+            {pdfStatus === 'loading' ? 'Rendering…' : `Case ${current.rank} PDF`}
           </button>
         </span>
       </div>
@@ -259,40 +329,70 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
         <p class="error small">{pdfError}</p>
       {/if}
       <div class="week">
-        <RoomTimetable room={selectedRoom} {capacity} classes={schedule.classes} />
+        <RoomTimetable room={selectedRoom} {capacity} {classes} flagged={moved} />
       </div>
     {:else}
       <div class="empty">
         <h1 class="big">8F</h1>
         {#if status === 'loading'}
-          <p>{autoSchedule ? 'Prolog is placing every flexible class…' : 'Checking the schedule…'}</p>
+          <p>Prolog is placing every flexible class…</p>
+          {#if uncapped}<p class="dim">No cap — searching for every case. This can take a long time.</p>{/if}
         {:else if status === 'error'}
           <p class="lbl">Couldn't load the schedule</p>
           <p class="error">{errorMessage}</p>
+        {:else if rows && !configFile}
+          <p>Now choose the config JSON, then run the scheduler.</p>
+          <p class="dim">Your CSV edits are kept — open them again with Edit CSV.</p>
         {:else}
-          <p>Load a schedule CSV and a config JSON to see each room's week.</p>
-          <p class="dim">Then pick a room on the floor plan or from the tabs on the right.</p>
+          <p>Choose a schedule CSV and a config JSON. The CSV opens in the editor; saving runs the scheduler.</p>
+          <p class="dim">Then pick a case from the tabs on the right and a room on the floor plan.</p>
         {/if}
       </div>
     {/if}
   </main>
 
-  <!-- Right edge: room tabs -->
-  <nav class="tabs" aria-label="Rooms">
-    <span class="tabs-label" aria-hidden="true">Rooms</span>
-    {#each rooms as room (room)}
-      <button
-        type="button"
-        class:selected={room === selectedRoom && schedule}
-        class:off={schedule?.capacities[room] === 0}
-        disabled={!schedule}
-        aria-pressed={room === selectedRoom}
-        title={room}
-        onclick={() => selectRoom(room)}
-      >{room.slice(4)}</button>
-    {/each}
+  <!-- Right edge: ranked case tabs (scrolls when there are many) -->
+  <nav class="cases" aria-label="Cases">
+    <span class="cases-label">Cases</span>
+    <span class="cases-count" title={result && !result.complete ? 'The time limit stopped the search' : ''}>
+      {result ? `${cases.length} found` : '—'}{result && !result.complete ? ' · timed out' : ''}
+    </span>
+    <div class="case-list">
+      {#each caseGroups as { label, bad, cases: group } (label)}
+        <span class="grp" class:bad>{label}</span>
+        {#each group as c (c.rank)}
+            <button
+              type="button"
+              class="ct"
+              class:u={bad}
+              class:selected={c.rank === current?.rank}
+              aria-pressed={c.rank === current?.rank}
+              title="Case {c.rank}: {c.score}% of classes satisfied{c.errors ? `, ${c.errors} moved` : ''}"
+              onclick={() => selectCase(c.rank)}
+            >
+              <b>{c.rank}</b>
+              <small>{c.score}%</small>
+              <span class="bar"><i style="width: {c.score}%"></i></span>
+            </button>
+        {/each}
+      {/each}
+    </div>
   </nav>
 </div>
+
+{#if editorOpen && rows}
+  <ScheduleEditor
+    {rows}
+    fileName={csvFile?.name}
+    {justUploaded}
+    {canRun}
+    busy={status === 'loading'}
+    error={editorError}
+    bind:maxCases
+    onsave={saveEdits}
+    oncancel={() => ((editorOpen = false), (justUploaded = false), (editorError = ''))}
+  />
+{/if}
 
 <style>
   /* One screen, no page scroll on laptops/desktops: the app fills the
@@ -302,7 +402,8 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
     height: 100%;
     min-height: 600px;
     display: grid;
-    grid-template-columns: clamp(300px, 26vw, 380px) minmax(0, 1fr) 64px;
+    grid-template-columns: clamp(300px, 26vw, 380px) minmax(0, 1fr) 76px;
+    overflow: hidden;
     background: var(--cream);
   }
 
@@ -391,7 +492,8 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
     gap: 8px;
   }
 
-  .inputs .step-head + .file {
+  .inputs .step-head + .file,
+  .inputs .step-head + .cap-row {
     margin-top: 2px;
   }
 
@@ -441,53 +543,6 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
   .file .act {
     flex: none;
     font-size: 11px;
-  }
-
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    cursor: pointer;
-  }
-
-  .toggle input {
-    position: absolute;
-    opacity: 0;
-  }
-
-  .track {
-    position: relative;
-    width: 36px;
-    height: 20px;
-    flex: none;
-    border-radius: 10px;
-    background: var(--soft);
-    transition: background 0.15s;
-  }
-
-  .track::after {
-    content: '';
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--cream);
-    transition: transform 0.15s;
-  }
-
-  .toggle input:checked + .track {
-    background: var(--ink);
-  }
-
-  .toggle input:checked + .track::after {
-    transform: translateX(16px);
-  }
-
-  .toggle input:focus-visible + .track {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
   }
 
   .help {
@@ -674,56 +729,221 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
     background: rgba(155, 44, 44, 0.06);
   }
 
-  /* ---- room tabs ---- */
-  .tabs {
+  /* ---- case tabs ---- */
+  .cases {
     background: var(--cream);
     border-left: 1px solid var(--soft);
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    gap: 4px;
-    padding: 16px 0;
+    padding: 16px 0 10px;
   }
 
-  .tabs-label {
+  .cases-label {
     align-self: center;
-    margin-bottom: 10px;
-    writing-mode: vertical-rl;
-    transform: rotate(180deg);
     font: 500 11px var(--sans);
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: var(--hair);
   }
 
-  .tabs button {
-    flex: 0 1 52px;
-    min-height: 34px;
+  .cases-count {
+    align-self: center;
+    margin-bottom: 6px;
+    font: 400 12px var(--sans);
+    color: var(--sub);
+  }
+
+  /* The only part of the page that scrolls, and only with many cases. */
+  .case-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--soft) transparent;
+  }
+
+  .grp {
+    margin: 6px 6px 4px;
+    padding-top: 6px;
+    border-top: 1px solid var(--soft);
+    text-align: center;
+    font: 500 9px var(--sans);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--hair);
+  }
+
+  .grp.bad {
+    color: var(--error);
+  }
+
+  .ct {
+    position: relative;
+    flex: none;
+    min-height: 50px;
     margin-left: 8px;
     border: 0;
     border-radius: 26px 0 0 26px;
     background: none;
-    font: 600 18px var(--serif);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
     transition: background 0.15s;
   }
 
-  .tabs button:hover:not(:disabled) {
+  .ct:hover {
     background: var(--hover);
   }
 
-  .tabs button.off {
-    color: var(--hair);
+  .ct b {
+    font: 600 19px/1 var(--serif);
   }
 
-  .tabs button.selected {
+  .ct small {
+    margin-top: 2px;
+    font: 500 11px var(--sans);
+    letter-spacing: 0.04em;
+    color: var(--sub);
+  }
+
+  .ct .bar {
+    position: relative;
+    width: 30px;
+    height: 2px;
+    margin-top: 3px;
+    background: var(--soft);
+  }
+
+  .ct .bar i {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: var(--ink);
+  }
+
+  .ct.u .bar i {
+    background: var(--error);
+  }
+
+  .ct.u::after {
+    content: '';
+    position: absolute;
+    top: 9px;
+    right: 12px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--error);
+  }
+
+  .ct.selected {
     background: var(--ink);
     color: var(--cream);
   }
 
-  .tabs button:disabled {
+  .ct.selected small {
     color: var(--soft);
-    cursor: default;
+  }
+
+  .ct.selected .bar {
+    background: #555;
+  }
+
+  .ct.selected .bar i {
+    background: var(--cream);
+  }
+
+  /* ---- step 2 + case readout ---- */
+  .cap-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .cap-row .dim {
+    display: block;
+    font: 400 12px var(--sans);
+    letter-spacing: 0.04em;
+    text-transform: none;
+  }
+
+  .num {
+    width: 64px;
+    padding: 5px 8px;
+    border: 1px solid var(--ink);
+    background: var(--cream);
+    font: 500 16px var(--sans);
+    text-align: right;
+  }
+
+  .load-row .btn {
+    flex: 1;
+  }
+
+  .readout .of {
+    font-size: 0.5em;
+    color: var(--sub);
+  }
+
+  .readout b.err {
+    color: var(--error);
+  }
+
+  .casebar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    padding: 6px 12px;
+    margin-bottom: clamp(6px, 1.4vh, 12px);
+    border: 1px solid var(--error);
+    background: rgba(155, 44, 44, 0.05);
+    color: var(--error);
+    font-size: 14px;
+  }
+
+  .casebar .tag {
+    flex: none;
+    padding: 2px 8px;
+    background: var(--error);
+    color: var(--cream);
+    font: 500 11px var(--sans);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .casebar ul {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    gap: 18px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .casebar li {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .casebar li::before {
+    content: '✕ ';
+    font-size: 11px;
+  }
+
+  .casebar .more {
+    flex: none;
+    font: 500 11px var(--sans);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
   }
 
   /* Short laptop screens: tighten the rail so the floor plan keeps its size. */
@@ -750,6 +970,7 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
     }
 
     .inputs > .step-head,
+    .cap-row,
     .load-row {
       grid-column: 1 / -1;
     }
@@ -772,25 +993,40 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
       grid-template-columns: 1fr;
     }
 
-    .tabs {
+    .app {
+      overflow: visible;
+    }
+
+    .cases {
       order: -1;
       flex-direction: row;
-      flex-wrap: wrap;
-      justify-content: center;
+      align-items: center;
       border-left: 0;
       padding: 8px;
     }
 
-    .tabs-label {
+    .cases-label,
+    .cases-count,
+    .grp {
       display: none;
     }
 
-    .tabs button {
-      flex: none;
-      width: 52px;
-      height: 40px;
+    .case-list {
+      flex-direction: row;
+      overflow: auto hidden;
+      gap: 4px;
+    }
+
+    .ct {
+      width: 56px;
+      min-height: 48px;
       margin: 0;
-      border-radius: 20px;
+      border-radius: 24px;
+    }
+
+    .casebar ul {
+      flex-direction: column;
+      gap: 2px;
     }
 
     .plan {

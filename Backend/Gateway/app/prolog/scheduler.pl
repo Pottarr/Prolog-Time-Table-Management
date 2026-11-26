@@ -97,3 +97,121 @@ slot_placement(NumRooms, Slot, p(Room, Day, Period)) :-
 
 placements_flat([], []).
 placements_flat([p(R, D, P) | Ps], [R, D, P | Rest]) :- placements_flat(Ps, Rest).
+
+% ======================================================================
+% Several cases (run by app/prolog_engine.py as `swipl -g main_cases`)
+% ======================================================================
+%
+% Same course encoding as above. A class's fixed room/day/period is what
+% it *asked for*. Rooms and professors are never double-booked and a class
+% never goes in a room too small for it — those are hard rules. Prints up
+% to MaxCases timetables, one per line, as soon as each is found:
+%
+%   - OK cases first: every timetable in which every class got what it
+%     asked for, in labeling order. If there is at least one, only OK
+%     cases are printed.
+%   - Otherwise unsatisfied cases, fewest unsatisfied classes first: all
+%     timetables in which exactly 1 class was moved off its requested
+%     room/day/period (to a free spot), then 2, 3, ... until MaxCases are
+%     printed. A class counts once however many of its values moved.
+%
+% MaxCases =< 0 means no cap, and TimeLimit =< 0 means no time limit.
+
+%!  main_cases
+%
+%   Reads `request(Courses, NumRooms, TimeLimit, MaxCases).` from stdin
+%   and prints "case -1 R1 D1 P1 R2 ..." per case (-1 = let the gateway
+%   score it). With no case at all it prints "unsatisfiable" or
+%   "timeout"; if the time limit cuts the search short after some cases,
+%   a final "timeout" line follows them.
+main_cases :-
+    read_term(user_input, request(Courses, NumRooms, TimeLimit, MaxCases), []),
+    nb_setval(cases_printed, 0),
+    (   TimeLimit > 0
+    ->  catch(call_with_time_limit(TimeLimit, all_cases(Courses, NumRooms, MaxCases)),
+              time_limit_exceeded,
+              TimedOut = true)
+    ;   all_cases(Courses, NumRooms, MaxCases)
+    ),
+    nb_getval(cases_printed, Printed),
+    (   TimedOut == true
+    ->  format("timeout~n")
+    ;   Printed =:= 0
+    ->  format("unsatisfiable~n")
+    ;   true
+    ).
+
+all_cases(Courses, NumRooms, MaxCases) :-
+    catch(enumerate_cases(Courses, NumRooms, MaxCases), enough_cases, true).
+
+enumerate_cases(Courses, NumRooms, MaxCases) :-
+    forall(place(Courses, NumRooms, Placements), emit_case(Placements, MaxCases)),
+    nb_getval(cases_printed, Printed),
+    (   Printed > 0
+    ->  true
+    ;   include(has_request, Courses, Requesting),
+        length(Requesting, MaxMoved),
+        forall(between(1, MaxMoved, Moved),
+               forall(relaxed_place(Courses, NumRooms, Moved, Placements),
+                      emit_case(Placements, MaxCases)))
+    ).
+
+has_request(c(_, _, Room, Day, Period)) :-
+    ( Room >= 0 ; Day >= 0 ; Period >= 0 ), !.
+
+emit_case(Placements, MaxCases) :-
+    placements_flat(Placements, Flat),
+    atomic_list_concat([case, -1 | Flat], ' ', Line),
+    format("~w~n", [Line]),
+    flush_output,
+    nb_getval(cases_printed, Printed0),
+    Printed is Printed0 + 1,
+    nb_setval(cases_printed, Printed),
+    (   MaxCases > 0, Printed >= MaxCases
+    ->  throw(enough_cases)
+    ;   true
+    ).
+
+% Like place/3 (same all_distinct rules), but every class may go to any
+% free slot in a room big enough for it, and exactly Moved classes end up
+% somewhere other than what they asked for.
+relaxed_place(Courses, NumRooms, Moved, Placements) :-
+    maplist(free_slot(NumRooms), Courses, Slots, ProfTimes, Flags),
+    all_distinct(Slots),
+    keysort(ProfTimes, Sorted),
+    group_pairs_by_key(Sorted, ByProf),
+    maplist(prof_free, ByProf),
+    sum(Flags, #=, Moved),
+    % Decide who moves first (staying put before moving), then where.
+    labeling([], Flags),
+    labeling([ff], Slots),
+    maplist(slot_placement(NumRooms), Slots, Placements).
+
+% Slot: any day/period, any room that fits. Flag is 1 iff the class
+% misses at least one of its requested room/day/period.
+free_slot(NumRooms, c(MinRoom, Prof, FixedRoom, FixedDay, FixedPeriod), Slot, Prof-Time, Flag) :-
+    MaxRoom is NumRooms - 1,
+    findall(S,
+            ( between(0, 6, Day), between(0, 1, Period), between(MinRoom, MaxRoom, Room),
+              S is (Day * 2 + Period) * NumRooms + Room ),
+            Allowed),
+    list_to_fdset(Allowed, Domain),
+    Slot in_set Domain,
+    Time #= Slot // NumRooms,
+    Room #= Slot mod NumRooms,
+    Day #= Time // 2,
+    Period #= Time mod 2,
+    include(asked, [Room-FixedRoom, Day-FixedDay, Period-FixedPeriod], Asked),
+    (   Asked == []
+    ->  Flag = 0
+    ;   maplist(differs, Asked, Misses),
+        foldl(or_, Misses, 0, Missed),
+        Flag #<==> Missed
+    ).
+
+asked(_-Fixed) :- Fixed >= 0.
+
+differs(Var-Fixed, (Var #\= Fixed)).
+
+or_(Miss, 0, Miss) :- !.
+or_(Miss, Acc, (Acc #\/ Miss)).
