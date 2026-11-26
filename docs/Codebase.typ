@@ -124,6 +124,7 @@ Prolog-Time-Table-Management/
       pyproject.toml
       app/
         building.py
+        cases.py
         config.py
         csv_validation.py
         main.py
@@ -171,6 +172,126 @@ def period_of(start: int, span: int) -> str | None:
         if begin <= start and start + span <= end:
             return name
     return None
+", "python")
+#v(1cm)
+#show-file("Backend/Gateway/app/cases.py", "\"\"\"Turning the scheduler's answers into ranked cases, and editor helpers.
+
+A *case* is one complete timetable; no case ever double-books a room or a
+professor. A class's room/day/start in the CSV is what it *asked for*. In
+an *unsatisfied* case some classes didn't get it — Prolog moved them to a
+free spot. Each case gets the list of those classes, their count
+(`errors`), a score (% of classes satisfied, unless Prolog sends its own)
+and a rank: fewest moved classes first, then in the order Prolog found
+them.
+\"\"\"
+
+from app.building import DAYS, PERIODS
+from app.csv_validation import prof_key
+
+DEFAULT_CASES = 10  # max_cases <= 0 means no cap
+
+_PERIOD_STARTS = {begin: name for name, (begin, _) in PERIODS.items()}
+
+
+def _when(day: str | None, start: int | None, room: str | None) -> str:
+    parts = [
+        day or \"any day\",
+        _PERIOD_STARTS.get(start, f\"{start}:00\") if start is not None else \"any time\",
+        room or \"any room\",
+    ]
+    return \" \".join(parts)
+
+
+def unsatisfied_classes(courses: list[dict], classes: list[dict]) -> list[dict]:
+    \"\"\"The classes that didn't get the room/day/start they asked for.
+
+    `courses` are the requests (room/day/start may be None = flexible),
+    `classes` the case's timetable, in the same order.
+    \"\"\"
+    moved = []
+    for i, (asked, got) in enumerate(zip(courses, classes)):
+        missed = [
+            field
+            for field in (\"room\", \"day\", \"start\")
+            if asked[field] is not None and asked[field] != got[field]
+        ]
+        if missed:
+            moved.append(
+                {
+                    \"row\": i,
+                    \"missed\": missed,
+                    \"asked\": {f: asked[f] for f in (\"room\", \"day\", \"start\")},
+                    \"message\": (
+                        f\"{got['title']} ({got['prof'].strip()}): asked \"
+                        f\"{_when(asked['day'], asked['start'], asked['room'])}, got \"
+                        f\"{_when(got['day'], got['start'], got['room'])}\"
+                    ),
+                }
+            )
+    return moved
+
+
+def rank_cases(cases: list[dict], courses: list[dict]) -> list[dict]:
+    \"\"\"Adds unsatisfied/errors/score/status to each case and sorts best first.
+
+    Each input case is {\"score\": int | None, \"classes\": [...], \"csv\": str}.
+    Ranking: fewest unsatisfied classes first (OK cases have 0), then
+    Prolog's order. Identical timetables are kept once.
+    \"\"\"
+    seen = set()
+    ranked = []
+    for order, case in enumerate(cases):
+        key = tuple((c[\"room\"], c[\"day\"], c[\"start\"]) for c in case[\"classes\"])
+        if key in seen:
+            continue
+        seen.add(key)
+        moved = unsatisfied_classes(courses, case[\"classes\"])
+        total = len(case[\"classes\"])
+        score = case[\"score\"]
+        if score is None:
+            score = 100 * (total - len(moved)) // total if total else 100
+        ranked.append(
+            {
+                **case,
+                \"score\": score,
+                \"unsatisfied\": moved,
+                \"errors\": len(moved),
+                \"status\": \"unsatisfied\" if moved else \"ok\",
+                \"_order\": order,
+            }
+        )
+    ranked.sort(key=lambda c: (c[\"errors\"], c[\"_order\"]))
+    for rank, case in enumerate(ranked, start=1):
+        del case[\"_order\"]
+        case[\"rank\"] = rank
+    return ranked
+
+
+def apply_professor_preference(rows: list[dict], prof: str, day: str, period: str) -> list[dict]:
+    \"\"\"Rewrites `day` / `start` on every row taught by `prof`.
+
+    `day` is \"keep\", \"any\" (flexible -> NULL) or a day code; `period` is
+    \"keep\", \"any\", or a period name (\"morning\" / \"afternoon\"), written as
+    that period's start hour. Professors match case- and
+    whitespace-insensitively, like everywhere else. Other columns and other
+    professors' rows are returned unchanged.
+    \"\"\"
+    if day not in (\"keep\", \"any\", *DAYS):
+        raise ValueError(f\"'day' must be keep, any or one of {', '.join(DAYS)}.\")
+    if period not in (\"keep\", \"any\", *PERIODS):
+        raise ValueError(f\"'period' must be keep, any or one of {', '.join(PERIODS)}.\")
+
+    key = prof_key(prof)
+    out = []
+    for row in rows:
+        row = dict(row)
+        if prof_key(row.get(\"prof\") or \"\") == key:
+            if day != \"keep\":
+                row[\"day\"] = None if day == \"any\" else day
+            if period != \"keep\":
+                row[\"start\"] = None if period == \"any\" else str(PERIODS[period][0])
+        out.append(row)
+    return out
 ", "python")
 #v(1cm)
 #show-file("Backend/Gateway/app/config.py", "import os
@@ -407,7 +528,9 @@ def _normalize_optional(value: str | None) -> str | None:
     return stripped
 
 
-def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[dict]:
+def parse_partial_schedule_csv(
+    raw: bytes, capacities: dict[str, int], *, allow_clashes: bool = False
+) -> list[dict]:
     \"\"\"Parse a schedule CSV for auto-scheduling.
 
     Unlike `validate_schedule_csv`, `room`, `day`, and `start` may each be
@@ -422,7 +545,9 @@ def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[d
     both day and start, its professor must not already be teaching
     another fixed class in that period, and if it fixes the room too, that
     room must be free in that period (rows left flexible are Prolog's to
-    keep apart).
+    keep apart). With `allow_clashes=True` those two clash checks are
+    skipped: the requests may clash, and the multi-case scheduler moves
+    classes to resolve it (\"unsatisfied\" cases).
 
     Returns one dict per row (room/day/start possibly None, span/students
     ints, title/prof strings) — this is the per-course shape consumed by
@@ -479,7 +604,7 @@ def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[d
                     f\"Row {line_no}: 'start' must be blank/NULL or an integer.\"
                 )
             period = _check_start(start, line_no)
-            if day is not None:
+            if day is not None and not allow_clashes:
                 _check_prof_free(teaching, prof, day, period, line_no)
                 if room is not None:
                     _check_room_free(booked, room, day, period, line_no)
@@ -500,24 +625,55 @@ def parse_partial_schedule_csv(raw: bytes, capacities: dict[str, int]) -> list[d
         raise CsvValidationError(\"CSV has no data rows.\")
 
     return courses
+
+
+def read_editable_rows(raw: bytes) -> list[dict]:
+    \"\"\"The CSV's rows as plain strings, for the frontend's editor.
+
+    Only the header is checked: the editor is where a broken row gets
+    fixed, so nothing else is rejected here. Blank and \"NULL\" cells come
+    back as None.
+    \"\"\"
+    reader = _read_rows(raw)
+    return [
+        {column: _normalize_optional(row.get(column)) for column in EXPECTED_COLUMNS}
+        for row in reader
+    ]
+
+
+def rows_to_csv(rows: list[dict]) -> str:
+    \"\"\"Writes editor rows (None or \"\" = flexible) back to a schedule CSV.\"\"\"
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator=\"\\n\")
+    writer.writerow(EXPECTED_COLUMNS)
+    for row in rows:
+        writer.writerow(
+            \"NULL\" if row.get(column) in (None, \"\") else str(row[column]).strip()
+            for column in EXPECTED_COLUMNS
+        )
+    return out.getvalue()
 ", "python")
 #v(1cm)
 #show-file("Backend/Gateway/app/main.py", "import csv
 import io
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 from app.building import BUILDING, FLOOR, PERIODS, ROOMS
+from app.cases import DEFAULT_CASES, apply_professor_preference, rank_cases
 from app.config import CORS_ALLOW_ORIGINS
 from app.csv_validation import (
     EXPECTED_COLUMNS,
     CsvValidationError,
     parse_partial_schedule_csv,
+    read_editable_rows,
+    rows_to_csv,
     validate_schedule_csv,
 )
-from app.prolog_engine import PrologError, generate_timetable
+from app.prolog_engine import PrologError, generate_cases, generate_timetable
 from app.schedule_config import ConfigValidationError, parse_schedule_config
 from app.typst_render import TypstCompileError, render_schedule_pdf
 
@@ -602,7 +758,8 @@ async def generate_schedule_pdf(
 
     Every row must already have room, day, and start filled in — for a
     CSV where professors left some of those blank, use
-    `/api/schedule/auto` first (its response carries the completed CSV).
+    `/api/schedule/auto` or `/api/schedule/cases` first (their responses
+    carry the completed CSV).
     \"\"\"
     config = await _read_config(config_file)
     csv_bytes, _ = await _read_complete_schedule(csv_file, config)
@@ -674,6 +831,111 @@ async def generate_schedule_auto(
         )
 
     return {**_schedule_response(config, classes), \"csv\": completed_csv}
+
+
+@app.post(\"/api/schedule/cases\")
+async def generate_schedule_cases(
+    csv_file: UploadFile = File(...),
+    config_file: UploadFile = File(...),
+    max_cases: int = Form(DEFAULT_CASES),
+) -> dict:
+    \"\"\"Runs the scheduler and returns up to `max_cases` ranked timetables
+    (`max_cases <= 0`: no cap and no time limit — every case there is).
+
+    Like `/api/schedule/auto`, room/day/start may be blank or NULL — and a
+    given room/day/start is what that class *asks for*. Requests that
+    clash (a room or professor asked twice for one period) are accepted.
+    Rooms and professors are never double-booked in a case: if every
+    class can get what it asked for, only those (OK) cases come back;
+    otherwise *unsatisfied* ones, where some classes were moved to a free
+    spot — fewest moved classes first. Each case carries its `classes`,
+    completed `csv`, `unsatisfied` (the moved classes, with what they
+    asked for and got), `errors` (how many), `score` (0-100, % of classes
+    satisfied), `status` (\"ok\" / \"unsatisfied\") and `rank` (1 = best).
+    `complete` is false when the time limit cut the search short.
+    Capacity, room, day and format errors are still rejected with 422.
+    \"\"\"
+    config = await _read_config(config_file)
+    capacities = config[\"capacities\"]
+
+    try:
+        courses = parse_partial_schedule_csv(
+            await csv_file.read(), capacities, allow_clashes=True
+        )
+    except CsvValidationError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    try:
+        result = generate_cases(capacities, courses, max_cases)
+    except PrologError as exc:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f\"The Prolog scheduler failed: {exc}\",
+        )
+    if result[\"status\"] != \"ok\":
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=result[\"reason\"])
+
+    cases = []
+    for case in result[\"cases\"]:
+        # Same re-check as /auto: even an unsatisfied case must keep every
+        # hard rule (no double-booking, capacity).
+        completed_csv = _to_csv(case[\"assignments\"])
+        try:
+            classes = validate_schedule_csv(completed_csv.encode(), capacities)
+        except CsvValidationError as exc:
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f\"Prolog returned an invalid timetable: {exc}\",
+            )
+        cases.append({\"score\": case[\"score\"], \"classes\": classes, \"csv\": completed_csv})
+
+    schedule = _schedule_response(config, [])
+    del schedule[\"classes\"]
+    return {
+        **schedule,
+        \"max_cases\": max(max_cases, 0),
+        \"complete\": result[\"complete\"],
+        \"cases\": rank_cases(cases, courses),
+    }
+
+
+@app.post(\"/api/csv/rows\")
+async def csv_rows(csv_file: UploadFile = File(...)) -> dict:
+    \"\"\"The CSV's rows for the frontend's editor (only the header is checked).\"\"\"
+    try:
+        return {\"rows\": read_editable_rows(await csv_file.read())}
+    except CsvValidationError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+
+class EditorRow(BaseModel):
+    room: str | None = None
+    day: str | None = None
+    start: str | None = None
+    span: str | None = None
+    title: str | None = None
+    prof: str | None = None
+    students: str | None = None
+
+
+class ProfessorPreference(BaseModel):
+    rows: list[EditorRow]
+    prof: str
+    day: str = \"keep\"  # keep | any | Mon..Sun
+    period: str = \"keep\"  # keep | any | morning | afternoon
+
+
+@app.post(\"/api/csv/professor-preference\")
+def professor_preference(body: ProfessorPreference) -> dict:
+    \"\"\"Applies a professor's general preference (a day and/or a period) to
+    every one of their rows, and returns the rows plus the rewritten CSV.\"\"\"
+    try:
+        rows = apply_professor_preference(
+            [row.model_dump() for row in body.rows], body.prof, body.day, body.period
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return {\"rows\": rows, \"csv\": rows_to_csv(rows)}
 ", "python")
 #v(1cm)
 #show-file("Backend/Gateway/app/prolog/scheduler.pl", ":- use_module(library(clpfd)).
@@ -775,6 +1037,124 @@ slot_placement(NumRooms, Slot, p(Room, Day, Period)) :-
 
 placements_flat([], []).
 placements_flat([p(R, D, P) | Ps], [R, D, P | Rest]) :- placements_flat(Ps, Rest).
+
+% ======================================================================
+% Several cases (run by app/prolog_engine.py as `swipl -g main_cases`)
+% ======================================================================
+%
+% Same course encoding as above. A class's fixed room/day/period is what
+% it *asked for*. Rooms and professors are never double-booked and a class
+% never goes in a room too small for it — those are hard rules. Prints up
+% to MaxCases timetables, one per line, as soon as each is found:
+%
+%   - OK cases first: every timetable in which every class got what it
+%     asked for, in labeling order. If there is at least one, only OK
+%     cases are printed.
+%   - Otherwise unsatisfied cases, fewest unsatisfied classes first: all
+%     timetables in which exactly 1 class was moved off its requested
+%     room/day/period (to a free spot), then 2, 3, ... until MaxCases are
+%     printed. A class counts once however many of its values moved.
+%
+% MaxCases =< 0 means no cap, and TimeLimit =< 0 means no time limit.
+
+%!  main_cases
+%
+%   Reads `request(Courses, NumRooms, TimeLimit, MaxCases).` from stdin
+%   and prints \"case -1 R1 D1 P1 R2 ...\" per case (-1 = let the gateway
+%   score it). With no case at all it prints \"unsatisfiable\" or
+%   \"timeout\"; if the time limit cuts the search short after some cases,
+%   a final \"timeout\" line follows them.
+main_cases :-
+    read_term(user_input, request(Courses, NumRooms, TimeLimit, MaxCases), []),
+    nb_setval(cases_printed, 0),
+    (   TimeLimit > 0
+    ->  catch(call_with_time_limit(TimeLimit, all_cases(Courses, NumRooms, MaxCases)),
+              time_limit_exceeded,
+              TimedOut = true)
+    ;   all_cases(Courses, NumRooms, MaxCases)
+    ),
+    nb_getval(cases_printed, Printed),
+    (   TimedOut == true
+    ->  format(\"timeout~n\")
+    ;   Printed =:= 0
+    ->  format(\"unsatisfiable~n\")
+    ;   true
+    ).
+
+all_cases(Courses, NumRooms, MaxCases) :-
+    catch(enumerate_cases(Courses, NumRooms, MaxCases), enough_cases, true).
+
+enumerate_cases(Courses, NumRooms, MaxCases) :-
+    forall(place(Courses, NumRooms, Placements), emit_case(Placements, MaxCases)),
+    nb_getval(cases_printed, Printed),
+    (   Printed > 0
+    ->  true
+    ;   include(has_request, Courses, Requesting),
+        length(Requesting, MaxMoved),
+        forall(between(1, MaxMoved, Moved),
+               forall(relaxed_place(Courses, NumRooms, Moved, Placements),
+                      emit_case(Placements, MaxCases)))
+    ).
+
+has_request(c(_, _, Room, Day, Period)) :-
+    ( Room >= 0 ; Day >= 0 ; Period >= 0 ), !.
+
+emit_case(Placements, MaxCases) :-
+    placements_flat(Placements, Flat),
+    atomic_list_concat([case, -1 | Flat], ' ', Line),
+    format(\"~w~n\", [Line]),
+    flush_output,
+    nb_getval(cases_printed, Printed0),
+    Printed is Printed0 + 1,
+    nb_setval(cases_printed, Printed),
+    (   MaxCases > 0, Printed >= MaxCases
+    ->  throw(enough_cases)
+    ;   true
+    ).
+
+% Like place/3 (same all_distinct rules), but every class may go to any
+% free slot in a room big enough for it, and exactly Moved classes end up
+% somewhere other than what they asked for.
+relaxed_place(Courses, NumRooms, Moved, Placements) :-
+    maplist(free_slot(NumRooms), Courses, Slots, ProfTimes, Flags),
+    all_distinct(Slots),
+    keysort(ProfTimes, Sorted),
+    group_pairs_by_key(Sorted, ByProf),
+    maplist(prof_free, ByProf),
+    sum(Flags, #=, Moved),
+    % Decide who moves first (staying put before moving), then where.
+    labeling([], Flags),
+    labeling([ff], Slots),
+    maplist(slot_placement(NumRooms), Slots, Placements).
+
+% Slot: any day/period, any room that fits. Flag is 1 iff the class
+% misses at least one of its requested room/day/period.
+free_slot(NumRooms, c(MinRoom, Prof, FixedRoom, FixedDay, FixedPeriod), Slot, Prof-Time, Flag) :-
+    MaxRoom is NumRooms - 1,
+    findall(S,
+            ( between(0, 6, Day), between(0, 1, Period), between(MinRoom, MaxRoom, Room),
+              S is (Day * 2 + Period) * NumRooms + Room ),
+            Allowed),
+    list_to_fdset(Allowed, Domain),
+    Slot in_set Domain,
+    Time #= Slot // NumRooms,
+    Room #= Slot mod NumRooms,
+    Day #= Time // 2,
+    Period #= Time mod 2,
+    include(asked, [Room-FixedRoom, Day-FixedDay, Period-FixedPeriod], Asked),
+    (   Asked == []
+    ->  Flag = 0
+    ;   maplist(differs, Asked, Misses),
+        foldl(or_, Misses, 0, Missed),
+        Flag #<==> Missed
+    ).
+
+asked(_-Fixed) :- Fixed >= 0.
+
+differs(Var-Fixed, (Var #\\= Fixed)).
+
+or_(Miss, 0, Miss) :- !.
+or_(Miss, Acc, (Acc #\\/ Miss)).
 ", "prolog")
 #v(1cm)
 #show-file("Backend/Gateway/app/prolog_engine.py", "\"\"\"Runs the SWI-Prolog scheduler (`prolog/scheduler.pl`) inside the gateway.
@@ -796,6 +1176,7 @@ integers this module computes — room names, days, titles and professor
 names never reach Prolog.
 \"\"\"
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -815,18 +1196,21 @@ class PrologError(RuntimeError):
     \"\"\"Raised when swipl exits abnormally or prints something unexpected.\"\"\"
 
 
-def _run(goal: str, request: str) -> str:
-    \"\"\"Runs `goal` from scheduler.pl with `request` on stdin; returns its stdout line.\"\"\"
+def _run(goal: str, request: str, timeout: float | None = PROCESS_TIMEOUT_SECONDS) -> str:
+    \"\"\"Runs `goal` from scheduler.pl with `request` on stdin; returns its stdout.
+
+    `timeout=None` waits as long as swipl takes (an uncapped cases run).
+    \"\"\"
     try:
         result = subprocess.run(
             [\"swipl\", \"-q\", \"-g\", goal, \"-t\", \"halt\", str(SCHEDULER_PL)],
             input=request,
             capture_output=True,
             text=True,
-            timeout=PROCESS_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise PrologError(f\"swipl didn't finish within {PROCESS_TIMEOUT_SECONDS}s\") from exc
+        raise PrologError(f\"swipl didn't finish within {timeout}s\") from exc
     if result.returncode != 0:
         raise PrologError(result.stderr.strip() or f\"swipl exited with {result.returncode}\")
     return result.stdout.strip()
@@ -842,6 +1226,33 @@ def generate_timetable(capacities: dict[str, int], courses: list[dict]) -> dict:
                                           title, prof, students}, ...]}
         {\"status\": \"unsatisfiable\" | \"timeout\", \"reason\": \"...\"}
     \"\"\"
+    rooms, terms = _encode(capacities, courses)
+    request = f\"request([{','.join(terms)}], {len(rooms)}, {SOLVE_TIME_LIMIT_SECONDS}).\\n\"
+    status, *flat = _run(\"main_timetable\", request).split() or [\"\"]
+
+    if status in _FAILURE_REASONS:
+        return {\"status\": status, \"reason\": _FAILURE_REASONS[status]}
+    if status != \"ok\" or len(flat) != 3 * len(courses):
+        raise PrologError(f\"Unexpected answer from scheduler.pl: {status!r}\")
+
+    return {\"status\": \"ok\", \"assignments\": _decode(rooms, courses, flat)}
+
+
+_FAILURE_REASONS = {
+    \"timeout\": (
+        f\"Prolog couldn't find a timetable within {SOLVE_TIME_LIMIT_SECONDS}s — \"
+        \"try fixing more rooms/days/times in the CSV.\"
+    ),
+    \"unsatisfiable\": (
+        \"No timetable satisfies every rule (one class per room and per \"
+        \"professor per period, room capacity, fixed rooms/days/times). \"
+        \"Free up some fixed values or move classes between periods.\"
+    ),
+}
+
+
+def _encode(capacities: dict[str, int], courses: list[dict]) -> tuple[list[str], list[str]]:
+    \"\"\"Rooms in index order, and one `c(MinRoom, Prof, Room, Day, Period)` term per course.\"\"\"
     # Smallest rooms first, so Prolog's low-values-first labeling prefers
     # the tightest room that fits each class.
     rooms = sorted(capacities, key=lambda room: (capacities[room], room))
@@ -860,36 +1271,113 @@ def generate_timetable(capacities: dict[str, int], courses: list[dict]) -> dict:
             else _FREE
         )
         terms.append(f\"c({min_room},{prof},{room},{day},{period})\")
+    return rooms, terms
 
-    request = f\"request([{','.join(terms)}], {len(rooms)}, {SOLVE_TIME_LIMIT_SECONDS}).\\n\"
-    status, *flat = _run(\"main_timetable\", request).split() or [\"\"]
 
-    if status == \"timeout\":
+# ----------------------------------------------------------- several cases
+#
+# scheduler.pl's multi-case entry point (`main_cases`; if it's ever
+# missing, `generate_cases` falls back to `main_timetable` and returns
+# that single answer as one case):
+#
+#   stdin:  request(Courses, NumRooms, TimeLimit, MaxCases).
+#           Courses/NumRooms as for main_timetable. MaxCases =< 0 means
+#           no cap, TimeLimit =< 0 no time limit (the gateway sends 0 for
+#           both when the user asks for no cap).
+#   stdout: one line per case, as soon as it's found:
+#               case Score R1 D1 P1 R2 D2 P2 ...
+#           Score is 0..100, or -1 to let the gateway score it (% of
+#           classes that got what they asked for). R/D/P are room/day/period indices
+#           per course, as for main_timetable. Fixed room/day/period
+#           values are what a class *asks for*; no case ever double-books
+#           a room or professor or breaks a capacity. If every class can
+#           get what it asked for, only such (OK) cases are printed;
+#           otherwise unsatisfied cases, where some classes were moved to
+#           a free spot, fewest moved classes first.
+#           With no case at all: one \"unsatisfiable\" or \"timeout\" line.
+#           If the time limit stopped the search after some cases, a
+#           final \"timeout\" line follows them.
+
+_CASES_GOAL_RE = re.compile(r\"^main_cases\\s*:-\", re.MULTILINE)
+
+
+def scheduler_supports_cases() -> bool:
+    \"\"\"Whether scheduler.pl defines the multi-case `main_cases` entry point.\"\"\"
+    return bool(_CASES_GOAL_RE.search(SCHEDULER_PL.read_text(encoding=\"utf-8\")))
+
+
+def generate_cases(capacities: dict[str, int], courses: list[dict], max_cases: int) -> dict:
+    \"\"\"Up to `max_cases` timetables for `courses` (see the contract above);
+    `max_cases <= 0` means no cap and no time limit.
+
+    Returns {\"status\": \"ok\", \"complete\": bool, \"cases\": [{\"score\": int |
+    None, \"assignments\": [...]}, ...]} — score None means \"gateway scores
+    it\", complete False means the time limit cut the search short — or
+    {\"status\": \"unsatisfiable\" | \"timeout\", \"reason\": \"...\"}.
+    \"\"\"
+    if not scheduler_supports_cases():
+        result = generate_timetable(capacities, courses)
+        if result[\"status\"] != \"ok\":
+            return result
         return {
-            \"status\": \"timeout\",
-            \"reason\": (
-                f\"Prolog couldn't find a timetable within {SOLVE_TIME_LIMIT_SECONDS}s — \"
-                \"try fixing more rooms/days/times in the CSV.\"
-            ),
+            \"status\": \"ok\",
+            \"complete\": True,
+            \"cases\": [{\"score\": None, \"assignments\": result[\"assignments\"]}],
         }
-    if status == \"unsatisfiable\":
-        return {
-            \"status\": \"unsatisfiable\",
-            \"reason\": (
-                \"No timetable satisfies every rule (one class per room and per \"
-                \"professor per period, room capacity, fixed rooms/days/times). \"
-                \"Free up some fixed values or move classes between periods.\"
-            ),
-        }
-    if status != \"ok\" or len(flat) != 3 * len(courses):
-        raise PrologError(f\"Unexpected answer from scheduler.pl: {status!r}\")
 
-    numbers = [int(n) for n in flat]
+    uncapped = max_cases <= 0
+    rooms, terms = _encode(capacities, courses)
+    time_limit = 0 if uncapped else SOLVE_TIME_LIMIT_SECONDS
+    request = f\"request([{','.join(terms)}], {len(rooms)}, {time_limit}, {max(max_cases, 0)}).\\n\"
+    output = _run(\"main_cases\", request, timeout=None if uncapped else PROCESS_TIMEOUT_SECONDS)
+    lines = [line.split() for line in output.splitlines() if line.strip()]
+    if len(lines) == 1 and len(lines[0]) == 1 and lines[0][0] in _FAILURE_REASONS:
+        status = lines[0][0]
+        return {\"status\": status, \"reason\": _FAILURE_REASONS[status]}
+    complete = not (lines and lines[-1] == [\"timeout\"])
+    if not complete:
+        lines.pop()
+
+    cases = []
+    for words in lines if uncapped else lines[:max_cases]:
+        if words[0] != \"case\" or len(words) != 2 + 3 * len(courses):
+            raise PrologError(f\"Unexpected answer from scheduler.pl: {' '.join(words[:3])!r}…\")
+        try:
+            score = int(words[1])
+        except ValueError as exc:
+            raise PrologError(f\"Unexpected case score from scheduler.pl: {words[1]!r}\") from exc
+        if not -1 <= score <= 100:
+            raise PrologError(f\"Case score out of range from scheduler.pl: {score}\")
+        cases.append(
+            {
+                \"score\": None if score == -1 else score,
+                \"assignments\": _decode(rooms, courses, words[2:]),
+            }
+        )
+    if not cases:
+        raise PrologError(\"scheduler.pl printed no cases\")
+    return {\"status\": \"ok\", \"complete\": complete, \"cases\": cases}
+
+
+def _decode(rooms: list[str], courses: list[dict], flat: list[str]) -> list[dict]:
+    \"\"\"Turns Prolog's flat [R1, D1, P1, R2, ...] back into one row per course.\"\"\"
+    try:
+        numbers = [int(n) for n in flat]
+    except ValueError as exc:
+        raise PrologError(\"scheduler.pl returned a non-integer placement\") from exc
+
     assignments = []
     for i, course in enumerate(courses):
         room_i, day_i, period_i = numbers[3 * i : 3 * i + 3]
+        if not (
+            0 <= room_i < len(rooms) and 0 <= day_i < len(DAYS) and 0 <= period_i < len(_PERIOD_NAMES)
+        ):
+            raise PrologError(\"scheduler.pl returned an out-of-range placement\")
         period = _PERIOD_NAMES[period_i]
-        start = course[\"start\"] if course[\"start\"] is not None else PERIODS[period][0]
+        # Keep the asked-for start unless the class was moved to another
+        # period (an unsatisfied case); then it starts with its new period.
+        asked = course[\"start\"]
+        start = asked if asked is not None and period_of(asked, course[\"span\"]) == period else PERIODS[period][0]
         assignments.append(
             {
                 \"room\": rooms[room_i],
@@ -902,7 +1390,7 @@ def generate_timetable(capacities: dict[str, int], courses: list[dict]) -> dict:
                 \"students\": course[\"students\"],
             }
         )
-    return {\"status\": \"ok\", \"assignments\": assignments}
+    return assignments
 ", "python")
 #v(1cm)
 #show-file("Backend/Gateway/app/schedule_config.py", "\"\"\"Validation for the uploaded schedule config (JSON).
@@ -1350,6 +1838,8 @@ Prolog-Time-Table-Management/
       lib/
         FloorPlan.svelte
         RoomTimetable.svelte
+        schedule.js
+        ScheduleEditor.svelte
 ```))
 #v(1cm)
 == Source Code
@@ -1425,6 +1915,9 @@ EXPOSE 80
     proxy_pass http://gateway:8000/api/;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
+    # An uncapped cases run (max_cases = 0) has no time limit.
+    proxy_read_timeout 1d;
+    proxy_send_timeout 1d;
   }
 
   location / {
@@ -1556,54 +2049,58 @@ input {
   import { API_BASE } from './config.js';
   import FloorPlan from './lib/FloorPlan.svelte';
   import RoomTimetable from './lib/RoomTimetable.svelte';
+  import ScheduleEditor from './lib/ScheduleEditor.svelte';
+  import { ROOMS as FLOOR_ROOMS, rowsToCsv } from './lib/schedule.js';
 
-  // The floor's rooms, so the plan and room tabs can be drawn before any
-  // schedule is loaded (the gateway sends the same list back with it).
-  const FLOOR_ROOMS = Array.from({ length: 10 }, (_, i) => `ECC-8${String(i + 1).padStart(2, '0')}`);
   const PERIODS_PER_WEEK = 14; // 7 days × morning/afternoon
+  const SHOWN_MOVED = 2; // moved classes listed in the case strip before \"+N more\"
 
   let csvFile = $state(null);
   let configFile = $state(null);
-  let autoSchedule = $state(false);
+  // The CSV as editable rows (from /api/csv/rows); the editor changes
+  // these and every scheduler run sends them back as a CSV.
+  let rows = $state(null);
+  let editorOpen = $state(false);
+  let justUploaded = $state(false);
+  let editorError = $state('');
+  let maxCases = $state(10);
+
   let status = $state('idle'); // idle | loading | error | done
   let errorMessage = $state('');
-  // The schedule on screen (from /api/schedule/parse, or solved by Prolog
-  // via /api/schedule/auto) plus the complete CSV + config it came from, so
-  // the PDF download matches what's on screen even if the form is changed
-  // afterwards. For auto-scheduling that CSV is Prolog's completed one.
-  let schedule = $state(null);
-  let submitted = $state(null);
-  let completedCsvUrl = $state('');
+  // The scheduler's answer (/api/schedule/cases): ranked cases, best first,
+  // plus the config they were made with so the PDF always matches.
+  let result = $state(null);
+  let resultConfig = $state(null);
+  let selectedRank = $state(1);
   let selectedRoom = $state(null);
   let pdfStatus = $state('idle'); // idle | loading | error
   let pdfError = $state('');
 
-  const rooms = $derived(schedule?.rooms ?? FLOOR_ROOMS);
-  const capacity = $derived(schedule && selectedRoom ? schedule.capacities[selectedRoom] : null);
-  const roomCount = $derived(
-    schedule && selectedRoom ? schedule.classes.filter((c) => c.room === selectedRoom).length : 0,
+  const cases = $derived(result?.cases ?? []);
+  const current = $derived(cases.find((c) => c.rank === selectedRank) ?? cases[0] ?? null);
+  const classes = $derived(current?.classes ?? []);
+  // Tab groups: OK, then by how many classes didn't get what they asked for.
+  const caseGroups = $derived(
+    cases.reduce((groups, c) => {
+      const label = c.errors === 0 ? 'OK' : `${c.errors} unsatisfied`;
+      const last = groups.at(-1);
+      if (last?.label === label) last.cases.push(c);
+      else groups.push({ label, bad: c.errors > 0, cases: [c] });
+      return groups;
+    }, []),
   );
+  const uncapped = $derived(Number(maxCases) <= 0);
+  // Classes the case moved off what they asked for: row index -> message.
+  const moved = $derived(new Map(current?.unsatisfied.map((u) => [u.row, u.message]) ?? []));
+  const movedRooms = $derived(new Set([...moved.keys()].map((i) => classes[i].room)));
+
+  const rooms = $derived(result?.rooms ?? FLOOR_ROOMS);
+  const capacity = $derived(result && selectedRoom ? result.capacities[selectedRoom] : null);
+  const roomCount = $derived(selectedRoom ? classes.filter((c) => c.room === selectedRoom).length : 0);
   const fileBase = $derived(
-    schedule ? `classroom-schedule-${schedule.academic_year}-s${schedule.semester}` : '',
+    result ? `classroom-schedule-${result.academic_year}-s${result.semester}-case${current?.rank ?? 1}` : '',
   );
-
-  function resetResult() {
-    status = 'loading';
-    errorMessage = '';
-    schedule = null;
-    if (completedCsvUrl) URL.revokeObjectURL(completedCsvUrl);
-    completedCsvUrl = '';
-    submitted = null;
-    pdfStatus = 'idle';
-    pdfError = '';
-  }
-
-  function buildFormData({ file, config }) {
-    const formData = new FormData();
-    formData.append('csv_file', file);
-    formData.append('config_file', config);
-    return formData;
-  }
+  const canRun = $derived(Boolean(rows && configFile));
 
   async function errorFromResponse(response) {
     const body = await response.json().catch(() => null);
@@ -1611,94 +2108,139 @@ input {
     return new Error(detail ?? `Request failed with status ${response.status}`);
   }
 
-  async function downloadPdf() {
-    pdfStatus = 'loading';
-    pdfError = '';
-    try {
-      const response = await fetch(`${API_BASE}/api/schedule/pdf`, {
-        method: 'POST',
-        body: buildFormData(submitted),
-      });
-      if (!response.ok) throw await errorFromResponse(response);
+  const messageOf = (err) => (err instanceof Error ? err.message : String(err));
 
-      const url = URL.createObjectURL(await response.blob());
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${fileBase}.pdf`;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 0);
-      pdfStatus = 'idle';
+  // A new CSV: read it into rows and open the editor straight away.
+  async function chooseCsv(file) {
+    if (!file) return;
+    csvFile = file;
+    const formData = new FormData();
+    formData.append('csv_file', file);
+    try {
+      const response = await fetch(`${API_BASE}/api/csv/rows`, { method: 'POST', body: formData });
+      if (!response.ok) throw await errorFromResponse(response);
+      rows = (await response.json()).rows;
+      editorError = '';
+      justUploaded = true;
+      editorOpen = true;
     } catch (err) {
-      pdfStatus = 'error';
-      pdfError = err instanceof Error ? err.message : String(err);
+      rows = null;
+      status = 'error';
+      errorMessage = messageOf(err);
     }
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  // 0 or less = no cap (every case, no time limit).
+  function clampCases() {
+    const n = Math.round(Number(maxCases));
+    maxCases = Number.isFinite(n) ? Math.max(0, n) : 10;
+  }
 
-    if (!csvFile || !configFile) {
-      status = 'error';
-      errorMessage = 'Choose both a schedule CSV and a config JSON file first.';
-      return;
-    }
+  async function runScheduler({ fromEditor = false } = {}) {
+    if (!canRun) return;
+    clampCases();
+    status = 'loading';
+    errorMessage = '';
+    editorError = '';
 
-    resetResult();
-
-    const inputs = { file: csvFile, config: configFile };
-    const endpoint = autoSchedule ? '/api/schedule/auto' : '/api/schedule/parse';
+    const formData = new FormData();
+    formData.append('csv_file', new Blob([rowsToCsv(rows)], { type: 'text/csv' }), csvFile?.name ?? 'schedule.csv');
+    formData.append('config_file', configFile);
+    formData.append('max_cases', String(maxCases));
 
     try {
-      const response = await fetch(`${API_BASE}${endpoint}`, {
-        method: 'POST',
-        body: buildFormData(inputs),
-      });
-
+      const response = await fetch(`${API_BASE}/api/schedule/cases`, { method: 'POST', body: formData });
       if (!response.ok) throw await errorFromResponse(response);
-
-      schedule = await response.json();
-      if (schedule.csv) {
-        const completed = new Blob([schedule.csv], { type: 'text/csv' });
-        submitted = { file: completed, config: inputs.config };
-        completedCsvUrl = URL.createObjectURL(completed);
-      } else {
-        submitted = inputs;
-      }
-      // Keep the room the user was looking at; otherwise open on the
-      // busiest room so the page never starts with an empty week.
-      if (!selectedRoom || !schedule.rooms.includes(selectedRoom)) {
-        const counts = schedule.classes.reduce(
-          (acc, c) => acc.set(c.room, (acc.get(c.room) ?? 0) + 1),
-          new Map(),
-        );
-        selectedRoom = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? schedule.rooms[0];
-      }
+      result = await response.json();
+      resultConfig = configFile;
+      pdfStatus = 'idle';
+      pdfError = '';
+      selectCase(1);
       status = 'done';
+      editorOpen = false;
+      justUploaded = false;
     } catch (err) {
-      status = 'error';
-      errorMessage = err instanceof Error ? err.message : String(err);
+      if (fromEditor) {
+        editorError = messageOf(err);
+        // Keep whatever was on screen before this run.
+        status = result ? 'done' : 'idle';
+      } else {
+        status = 'error';
+        errorMessage = messageOf(err);
+      }
+    }
+  }
+
+  function saveEdits(edited) {
+    rows = edited;
+    if (configFile) runScheduler({ fromEditor: true });
+    else {
+      editorOpen = false;
+      justUploaded = false;
+    }
+  }
+
+  function selectCase(rank) {
+    selectedRank = rank;
+    if (pdfStatus === 'error') pdfStatus = 'idle'; // an old case's PDF error
+    const shown = cases.find((c) => c.rank === rank)?.classes ?? [];
+    // Keep the room the user was looking at; otherwise open on the
+    // busiest room so the page never starts with an empty week.
+    if (!selectedRoom || !result.rooms.includes(selectedRoom)) {
+      const counts = shown.reduce((acc, c) => acc.set(c.room, (acc.get(c.room) ?? 0) + 1), new Map());
+      selectedRoom = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? result.rooms[0];
     }
   }
 
   function selectRoom(room) {
-    if (schedule) selectedRoom = room;
+    if (result) selectedRoom = room;
+  }
+
+  function saveFile(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function downloadCsv() {
+    saveFile(new Blob([current.csv], { type: 'text/csv' }), `${fileBase}.csv`);
+  }
+
+  async function downloadPdf() {
+    pdfStatus = 'loading';
+    pdfError = '';
+    const formData = new FormData();
+    formData.append('csv_file', new Blob([current.csv], { type: 'text/csv' }), 'schedule.csv');
+    formData.append('config_file', resultConfig);
+    try {
+      const response = await fetch(`${API_BASE}/api/schedule/pdf`, { method: 'POST', body: formData });
+      if (!response.ok) throw await errorFromResponse(response);
+      saveFile(await response.blob(), `${fileBase}.pdf`);
+      pdfStatus = 'idle';
+    } catch (err) {
+      pdfStatus = 'error';
+      pdfError = messageOf(err);
+    }
   }
 </script>
 
 <div class=\"app\">
-  <!-- Left rail: inputs, the floor plan, exports -->
+  <!-- Left rail: inputs, the floor plan -->
   <aside class=\"rail\">
     <div class=\"brand\">
       <div class=\"logo\" aria-hidden=\"true\"><span>8F</span></div>
       <div class=\"lbl\">
         ECC timetable
         <span class=\"dim\">
-          {schedule ? `Semester ${schedule.semester} · ${schedule.academic_year}` : '8th floor · 801 – 810'}
+          {result ? `Semester ${result.semester} · ${result.academic_year}` : '8th floor · 801 – 810'}
         </span>
       </div>
     </div>
 
-    <form class=\"inputs\" onsubmit={handleSubmit}>
+    <div class=\"inputs\">
       <div class=\"step-head\">
         <span class=\"lbl\"><span class=\"n\">1</span> Files</span>
         <details class=\"help\">
@@ -1707,10 +2249,12 @@ input {
             <p class=\"lbl\">Schedule CSV</p>
             <pre>room,day,start,span,title,prof,students
 ECC-804,Mon,9,3,Software Design,Dr. Veera,35
-ECC-808,Mon,13,3,Discrete Mathematics,Dr. Visit,100</pre>
+NULL,NULL,13,3,Algorithms,Dr. Visit,100</pre>
             <p>
               <code>day</code> is Mon – Sun · <code>start</code> is 9 (morning) or 13 (afternoon) ·
-              <code>span</code> is always 3 · <code>students</code> can't exceed the room's seats.
+              <code>span</code> is always 3 · <code>students</code> can't exceed the room's seats. Leave
+              <code>room</code>, <code>day</code> or <code>start</code> blank (or <code>NULL</code>) and Prolog
+              picks it. The editor opens as soon as you choose a CSV.
             </p>
 
             <p class=\"lbl\">Config JSON</p>
@@ -1726,19 +2270,26 @@ ECC-808,Mon,13,3,Discrete Mathematics,Dr. Visit,100</pre>
 }`}</pre>
             <p>Seats for all ten rooms; <code>0</code> = not used for lectures (806 is the co-working space).</p>
 
-            <p class=\"lbl\">Auto-schedule</p>
-            <pre>NULL,NULL,13,3,Algorithms,Dr. Veera,35
-ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
+            <p class=\"lbl\">Cases</p>
             <p>
-              Leave <code>room</code>, <code>day</code> or <code>start</code> blank (or <code>NULL</code>)
-              and Prolog fills them in. The first row means \"any day, any room, starts 13:00\"; the
-              second \"room 804 on Monday, any time\".
+              The scheduler returns the first <em>Cases</em> timetables (<code>0</code> = no cap: every case, however
+              long it takes). A room, day or start in the CSV is what that class asks for; rooms and professors
+              are never double-booked. If every class can get what it asked for, only those (OK) cases are shown.
+              Otherwise you get <em>unsatisfied</em> ones — some classes moved to a free spot — fewest moved
+              classes first.
             </p>
           </div>
         </details>
       </div>
       <label class=\"file\" class:set={csvFile}>
-        <input type=\"file\" accept=\".csv,text/csv\" onchange={(e) => (csvFile = e.target.files?.[0] ?? null)} />
+        <input
+          type=\"file\"
+          accept=\".csv,text/csv\"
+          onchange={(e) => {
+            chooseCsv(e.target.files?.[0] ?? null);
+            e.target.value = '';
+          }}
+        />
         <span class=\"name\">{csvFile?.name ?? 'Choose schedule CSV'}</span>
         <span class=\"act lbl\">{csvFile ? 'Change' : 'Browse'}</span>
       </label>
@@ -1748,64 +2299,76 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
         <span class=\"act lbl\">{configFile ? 'Change' : 'Browse'}</span>
       </label>
 
+      <div class=\"step-head\">
+        <span class=\"lbl\"><span class=\"n\">2</span> Schedule</span>
+      </div>
+      <label class=\"cap-row\">
+        <span class=\"lbl\">Cases to return <span class=\"dim\">{uncapped ? 'no cap — every case' : '0 = no cap'}</span></span>
+        <input class=\"num\" type=\"number\" min=\"0\" bind:value={maxCases} onchange={clampCases} />
+      </label>
       <div class=\"load-row\">
-        <label class=\"toggle\" title=\"Leave room, day or start blank (or NULL) and Prolog fills them in\">
-          <input type=\"checkbox\" bind:checked={autoSchedule} />
-          <span class=\"track\" aria-hidden=\"true\"></span>
-          Auto-schedule
-        </label>
-        <button class=\"btn\" type=\"submit\" disabled={status === 'loading'}>
-          {#if status === 'loading'}
-            {autoSchedule ? 'Scheduling…' : 'Loading…'}
-          {:else}
-            <span class=\"n\">2</span> Load
-          {/if}
+        <button class=\"btn ghost\" type=\"button\" disabled={!rows} onclick={() => ((justUploaded = false), (editorOpen = true))}>
+          Edit CSV
+        </button>
+        <button class=\"btn\" type=\"button\" disabled={!canRun || status === 'loading'} onclick={() => runScheduler()}>
+          {status === 'loading' ? 'Scheduling…' : 'Run scheduler'}
         </button>
       </div>
-    </form>
+    </div>
 
     <div class=\"plan\">
       <FloorPlan
-        classes={schedule?.classes ?? []}
-        capacities={schedule?.capacities ?? null}
-        selectedRoom={schedule ? selectedRoom : null}
+        {classes}
+        capacities={result?.capacities ?? null}
+        selectedRoom={result ? selectedRoom : null}
+        flaggedRooms={movedRooms}
         onselect={selectRoom}
       />
     </div>
   </aside>
 
-  <!-- Main: the selected room's week -->
+  <!-- Main: the selected room's week in the selected case -->
   <main class=\"main\">
-    {#if status === 'done' && schedule && selectedRoom}
+    {#if result && current && selectedRoom}
       <header class=\"room-head\">
         <h1 class=\"big\">{selectedRoom.slice(4)}</h1>
         <div class=\"facts\">
           <div class=\"lbl\">ECC · {capacity === 0 ? 'Co-working space' : 'Classroom'}</div>
           <div class=\"seats\">{capacity === 0 ? 'Not used for lectures' : `${capacity} seats`}</div>
           {#if capacity !== 0}
-            <div class=\"dim\">{roomCount} class{roomCount === 1 ? '' : 'es'} · {roomCount * 3} h / week</div>
+            <div class=\"dim\">
+              {roomCount} class{roomCount === 1 ? '' : 'es'} · {Math.round((roomCount / PERIODS_PER_WEEK) * 100)}% of
+              periods
+            </div>
           {/if}
         </div>
         <div class=\"readout\">
-          <div><b>{schedule.classes.length}</b><small>Classes on floor</small></div>
-          <div>
-            <b>{capacity === 0 ? '—' : `${Math.round((roomCount / PERIODS_PER_WEEK) * 100)}%`}</b>
-            <small>Periods used</small>
-          </div>
+          <div><b>{current.rank}<span class=\"of\"> / {cases.length}</span></b><small>Rank</small></div>
+          <div><b class:err={current.status !== 'ok'}>{current.score}%</b><small>Satisfied</small></div>
+          <div><b class:err={current.errors}>{current.errors}</b><small>Unsatisfied</small></div>
         </div>
       </header>
+      {#if current.status !== 'ok'}
+        <div class=\"casebar\" title={current.unsatisfied.map((u) => u.message).join('\\n')}>
+          <span class=\"tag\">Case {current.rank} · {current.errors} unsatisfied</span>
+          <ul>
+            {#each current.unsatisfied.slice(0, SHOWN_MOVED) as u (u.row)}<li>{u.message}</li>{/each}
+          </ul>
+          {#if current.unsatisfied.length > SHOWN_MOVED}
+            <span class=\"more\">+{current.unsatisfied.length - SHOWN_MOVED} more</span>
+          {/if}
+        </div>
+      {/if}
       <div class=\"sect\">
         <span class=\"lbl\">
           Weekly timetable — {selectedRoom}
-          {#if completedCsvUrl}<span class=\"dim\"> · scheduled by Prolog</span>{/if}
+          <span class=\"dim\"> · case {current.rank}, scheduled by Prolog</span>
         </span>
         <span class=\"exports\">
           <span class=\"lbl\"><span class=\"n\">3</span> Export</span>
-          {#if completedCsvUrl}
-            <a class=\"btn ghost small\" href={completedCsvUrl} download=\"{fileBase}.csv\">Completed CSV</a>
-          {/if}
+          <button class=\"btn ghost small\" type=\"button\" onclick={downloadCsv} title=\"Download case {current.rank} as a CSV\">Case {current.rank} CSV</button>
           <button class=\"btn small\" type=\"button\" onclick={downloadPdf} disabled={pdfStatus === 'loading'}>
-            {pdfStatus === 'loading' ? 'Rendering…' : 'Summary PDF'}
+            {pdfStatus === 'loading' ? 'Rendering…' : `Case ${current.rank} PDF`}
           </button>
         </span>
       </div>
@@ -1813,40 +2376,70 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
         <p class=\"error small\">{pdfError}</p>
       {/if}
       <div class=\"week\">
-        <RoomTimetable room={selectedRoom} {capacity} classes={schedule.classes} />
+        <RoomTimetable room={selectedRoom} {capacity} {classes} flagged={moved} />
       </div>
     {:else}
       <div class=\"empty\">
         <h1 class=\"big\">8F</h1>
         {#if status === 'loading'}
-          <p>{autoSchedule ? 'Prolog is placing every flexible class…' : 'Checking the schedule…'}</p>
+          <p>Prolog is placing every flexible class…</p>
+          {#if uncapped}<p class=\"dim\">No cap — searching for every case. This can take a long time.</p>{/if}
         {:else if status === 'error'}
           <p class=\"lbl\">Couldn't load the schedule</p>
           <p class=\"error\">{errorMessage}</p>
+        {:else if rows && !configFile}
+          <p>Now choose the config JSON, then run the scheduler.</p>
+          <p class=\"dim\">Your CSV edits are kept — open them again with Edit CSV.</p>
         {:else}
-          <p>Load a schedule CSV and a config JSON to see each room's week.</p>
-          <p class=\"dim\">Then pick a room on the floor plan or from the tabs on the right.</p>
+          <p>Choose a schedule CSV and a config JSON. The CSV opens in the editor; saving runs the scheduler.</p>
+          <p class=\"dim\">Then pick a case from the tabs on the right and a room on the floor plan.</p>
         {/if}
       </div>
     {/if}
   </main>
 
-  <!-- Right edge: room tabs -->
-  <nav class=\"tabs\" aria-label=\"Rooms\">
-    <span class=\"tabs-label\" aria-hidden=\"true\">Rooms</span>
-    {#each rooms as room (room)}
-      <button
-        type=\"button\"
-        class:selected={room === selectedRoom && schedule}
-        class:off={schedule?.capacities[room] === 0}
-        disabled={!schedule}
-        aria-pressed={room === selectedRoom}
-        title={room}
-        onclick={() => selectRoom(room)}
-      >{room.slice(4)}</button>
-    {/each}
+  <!-- Right edge: ranked case tabs (scrolls when there are many) -->
+  <nav class=\"cases\" aria-label=\"Cases\">
+    <span class=\"cases-label\">Cases</span>
+    <span class=\"cases-count\" title={result && !result.complete ? 'The time limit stopped the search' : ''}>
+      {result ? `${cases.length} found` : '—'}{result && !result.complete ? ' · timed out' : ''}
+    </span>
+    <div class=\"case-list\">
+      {#each caseGroups as { label, bad, cases: group } (label)}
+        <span class=\"grp\" class:bad>{label}</span>
+        {#each group as c (c.rank)}
+            <button
+              type=\"button\"
+              class=\"ct\"
+              class:u={bad}
+              class:selected={c.rank === current?.rank}
+              aria-pressed={c.rank === current?.rank}
+              title=\"Case {c.rank}: {c.score}% of classes satisfied{c.errors ? `, ${c.errors} moved` : ''}\"
+              onclick={() => selectCase(c.rank)}
+            >
+              <b>{c.rank}</b>
+              <small>{c.score}%</small>
+              <span class=\"bar\"><i style=\"width: {c.score}%\"></i></span>
+            </button>
+        {/each}
+      {/each}
+    </div>
   </nav>
 </div>
+
+{#if editorOpen && rows}
+  <ScheduleEditor
+    {rows}
+    fileName={csvFile?.name}
+    {justUploaded}
+    {canRun}
+    busy={status === 'loading'}
+    error={editorError}
+    bind:maxCases
+    onsave={saveEdits}
+    oncancel={() => ((editorOpen = false), (justUploaded = false), (editorError = ''))}
+  />
+{/if}
 
 <style>
   /* One screen, no page scroll on laptops/desktops: the app fills the
@@ -1856,7 +2449,8 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
     height: 100%;
     min-height: 600px;
     display: grid;
-    grid-template-columns: clamp(300px, 26vw, 380px) minmax(0, 1fr) 64px;
+    grid-template-columns: clamp(300px, 26vw, 380px) minmax(0, 1fr) 76px;
+    overflow: hidden;
     background: var(--cream);
   }
 
@@ -1945,7 +2539,8 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
     gap: 8px;
   }
 
-  .inputs .step-head + .file {
+  .inputs .step-head + .file,
+  .inputs .step-head + .cap-row {
     margin-top: 2px;
   }
 
@@ -1995,53 +2590,6 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
   .file .act {
     flex: none;
     font-size: 11px;
-  }
-
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    cursor: pointer;
-  }
-
-  .toggle input {
-    position: absolute;
-    opacity: 0;
-  }
-
-  .track {
-    position: relative;
-    width: 36px;
-    height: 20px;
-    flex: none;
-    border-radius: 10px;
-    background: var(--soft);
-    transition: background 0.15s;
-  }
-
-  .track::after {
-    content: '';
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--cream);
-    transition: transform 0.15s;
-  }
-
-  .toggle input:checked + .track {
-    background: var(--ink);
-  }
-
-  .toggle input:checked + .track::after {
-    transform: translateX(16px);
-  }
-
-  .toggle input:focus-visible + .track {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
   }
 
   .help {
@@ -2228,56 +2776,221 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
     background: rgba(155, 44, 44, 0.06);
   }
 
-  /* ---- room tabs ---- */
-  .tabs {
+  /* ---- case tabs ---- */
+  .cases {
     background: var(--cream);
     border-left: 1px solid var(--soft);
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    gap: 4px;
-    padding: 16px 0;
+    padding: 16px 0 10px;
   }
 
-  .tabs-label {
+  .cases-label {
     align-self: center;
-    margin-bottom: 10px;
-    writing-mode: vertical-rl;
-    transform: rotate(180deg);
     font: 500 11px var(--sans);
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: var(--hair);
   }
 
-  .tabs button {
-    flex: 0 1 52px;
-    min-height: 34px;
+  .cases-count {
+    align-self: center;
+    margin-bottom: 6px;
+    font: 400 12px var(--sans);
+    color: var(--sub);
+  }
+
+  /* The only part of the page that scrolls, and only with many cases. */
+  .case-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--soft) transparent;
+  }
+
+  .grp {
+    margin: 6px 6px 4px;
+    padding-top: 6px;
+    border-top: 1px solid var(--soft);
+    text-align: center;
+    font: 500 9px var(--sans);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--hair);
+  }
+
+  .grp.bad {
+    color: var(--error);
+  }
+
+  .ct {
+    position: relative;
+    flex: none;
+    min-height: 50px;
     margin-left: 8px;
     border: 0;
     border-radius: 26px 0 0 26px;
     background: none;
-    font: 600 18px var(--serif);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
     transition: background 0.15s;
   }
 
-  .tabs button:hover:not(:disabled) {
+  .ct:hover {
     background: var(--hover);
   }
 
-  .tabs button.off {
-    color: var(--hair);
+  .ct b {
+    font: 600 19px/1 var(--serif);
   }
 
-  .tabs button.selected {
+  .ct small {
+    margin-top: 2px;
+    font: 500 11px var(--sans);
+    letter-spacing: 0.04em;
+    color: var(--sub);
+  }
+
+  .ct .bar {
+    position: relative;
+    width: 30px;
+    height: 2px;
+    margin-top: 3px;
+    background: var(--soft);
+  }
+
+  .ct .bar i {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: var(--ink);
+  }
+
+  .ct.u .bar i {
+    background: var(--error);
+  }
+
+  .ct.u::after {
+    content: '';
+    position: absolute;
+    top: 9px;
+    right: 12px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--error);
+  }
+
+  .ct.selected {
     background: var(--ink);
     color: var(--cream);
   }
 
-  .tabs button:disabled {
+  .ct.selected small {
     color: var(--soft);
-    cursor: default;
+  }
+
+  .ct.selected .bar {
+    background: #555;
+  }
+
+  .ct.selected .bar i {
+    background: var(--cream);
+  }
+
+  /* ---- step 2 + case readout ---- */
+  .cap-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .cap-row .dim {
+    display: block;
+    font: 400 12px var(--sans);
+    letter-spacing: 0.04em;
+    text-transform: none;
+  }
+
+  .num {
+    width: 64px;
+    padding: 5px 8px;
+    border: 1px solid var(--ink);
+    background: var(--cream);
+    font: 500 16px var(--sans);
+    text-align: right;
+  }
+
+  .load-row .btn {
+    flex: 1;
+  }
+
+  .readout .of {
+    font-size: 0.5em;
+    color: var(--sub);
+  }
+
+  .readout b.err {
+    color: var(--error);
+  }
+
+  .casebar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    padding: 6px 12px;
+    margin-bottom: clamp(6px, 1.4vh, 12px);
+    border: 1px solid var(--error);
+    background: rgba(155, 44, 44, 0.05);
+    color: var(--error);
+    font-size: 14px;
+  }
+
+  .casebar .tag {
+    flex: none;
+    padding: 2px 8px;
+    background: var(--error);
+    color: var(--cream);
+    font: 500 11px var(--sans);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .casebar ul {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    gap: 18px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .casebar li {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .casebar li::before {
+    content: '✕ ';
+    font-size: 11px;
+  }
+
+  .casebar .more {
+    flex: none;
+    font: 500 11px var(--sans);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
   }
 
   /* Short laptop screens: tighten the rail so the floor plan keeps its size. */
@@ -2304,6 +3017,7 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
     }
 
     .inputs > .step-head,
+    .cap-row,
     .load-row {
       grid-column: 1 / -1;
     }
@@ -2326,25 +3040,40 @@ ECC-804,Mon,NULL,3,Databases,Dr. Suphamit,40</pre>
       grid-template-columns: 1fr;
     }
 
-    .tabs {
+    .app {
+      overflow: visible;
+    }
+
+    .cases {
       order: -1;
       flex-direction: row;
-      flex-wrap: wrap;
-      justify-content: center;
+      align-items: center;
       border-left: 0;
       padding: 8px;
     }
 
-    .tabs-label {
+    .cases-label,
+    .cases-count,
+    .grp {
       display: none;
     }
 
-    .tabs button {
-      flex: none;
-      width: 52px;
-      height: 40px;
+    .case-list {
+      flex-direction: row;
+      overflow: auto hidden;
+      gap: 4px;
+    }
+
+    .ct {
+      width: 56px;
+      min-height: 48px;
       margin: 0;
-      border-radius: 20px;
+      border-radius: 24px;
+    }
+
+    .casebar ul {
+      flex-direction: column;
+      gap: 2px;
     }
 
     .plan {
@@ -2381,7 +3110,9 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
   // left as they are and aren't clickable.
   import floorPlanSvg from './ecc-8th-floor.svg?raw';
 
-  let { classes = [], capacities = null, selectedRoom = null, onselect } = $props();
+  // `flaggedRooms`: rooms holding a class that didn't get what it asked
+  // for in the case on screen (drawn red).
+  let { classes = [], capacities = null, selectedRoom = null, flaggedRooms = new Set(), onselect } = $props();
 
   const WIDTH = 814;
   const HEIGHT = 499;
@@ -2406,13 +3137,14 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
       'room',
       !loaded ? 'idle' : unused ? 'unused' : count > 0 ? 'booked' : 'empty',
       room === selectedRoom ? 'selected' : '',
+      flaggedRooms.has(room) ? 'clash' : '',
     ].join(' ');
     const sub = !loaded ? '' : unused ? 'not used' : count === 0 ? 'free' : `${count} class${count === 1 ? '' : 'es'}`;
     const label = !loaded
       ? room
       : unused
         ? `${room}: not used for lectures`
-        : `${room}: ${capacities[room]} seats, ${count === 0 ? 'no classes' : sub}`;
+        : `${room}: ${capacities[room]} seats, ${count === 0 ? 'no classes' : sub}${flaggedRooms.has(room) ? ', has a moved class' : ''}`;
     // In the turned plan, \"up\" on screen is towards smaller x in the
     // original drawing, so the number sits at x - 10 and the count at x + 14.
     const nx = Number(x) - (sub ? 10 : 0);
@@ -2535,6 +3267,16 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
     fill: var(--accent);
   }
 
+  .plan :global(.room.clash .num),
+  .plan :global(.room.clash .sub) {
+    fill: var(--error);
+  }
+
+  .plan :global(.room.clash rect) {
+    stroke: var(--error);
+    stroke-width: 3;
+  }
+
   .plan :global(.room.unused rect) {
     fill: var(--tan);
   }
@@ -2568,8 +3310,10 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
   // 09:00–12:00 | lunch | afternoon 13:00–16:00). Every class fills exactly
   // one period (the gateway enforces that), so one cell = one class. The
   // grid stretches to the height it's given, and long titles shrink and
-  // clamp instead of making the page scroll.
-  let { room, capacity, classes = [] } = $props();
+  // clamp instead of making the page scroll. `flagged` maps a class's
+  // index to why it's flagged (in an unsatisfied case: a class that didn't
+  // get what it asked for); those are tinted red.
+  let { room, capacity, classes = [], flagged = new Map() } = $props();
 
   const DAYS = [
     ['Mon', 'Monday'],
@@ -2583,7 +3327,13 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
   const WEEKEND = new Set(['Sat', 'Sun']);
 
   const byDayStart = $derived(
-    new Map(classes.filter((c) => c.room === room).map((c) => [`${c.day}-${c.start}`, c])),
+    classes.reduce((cells, c, i) => {
+      if (c.room !== room) return cells;
+      const key = `${c.day}-${c.start}`;
+      if (!cells.has(key)) cells.set(key, []);
+      cells.get(key).push({ ...c, note: flagged.get(i) ?? null });
+      return cells;
+    }, new Map()),
   );
 </script>
 
@@ -2604,16 +3354,20 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
           {#if start === null}
             <span class=\"lunch\" role=\"cell\" aria-label=\"Lunch\"></span>
           {:else}
-            {@const lesson = byDayStart.get(`${code}-${start}`)}
+            {@const lessons = byDayStart.get(`${code}-${start}`) ?? []}
             <span class=\"cell\" role=\"cell\">
-              {#if lesson}
-                <span class=\"class\" title=\"{lesson.title} — {lesson.prof}, {lesson.students} / {capacity} seats\">
+              {#each lessons as lesson, j (j)}
+                <span
+                  class=\"class\"
+                  class:clash={lesson.note || lessons.length > 1}
+                  title={lesson.note ?? `${lesson.title} — ${lesson.prof}, ${lesson.students} / ${capacity} seats`}
+                >
                   <b>{lesson.title}</b>
-                  <span class=\"meta\">{lesson.prof} · {lesson.students} / {capacity} seats</span>
+                  <span class=\"meta\">{lesson.note ? 'Moved · ' : ''}{lesson.prof} · {lesson.students} / {capacity} seats</span>
                 </span>
               {:else}
                 <span class=\"free\">Free</span>
-              {/if}
+              {/each}
             </span>
           {/if}
         {/each}
@@ -2686,7 +3440,12 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
     overflow: hidden;
   }
 
+  .cell {
+    gap: 0.6em;
+  }
+
   .class {
+    flex: 1 1 0;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -2703,6 +3462,16 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+
+  .class.clash {
+    border-left-color: var(--error);
+    background: rgba(155, 44, 44, 0.07);
+    padding-right: 0.4em;
+  }
+
+  .class.clash .meta {
+    color: var(--error);
   }
 
   .meta {
@@ -2736,6 +3505,810 @@ export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
       grid-template-rows: auto;
       grid-auto-rows: minmax(64px, auto);
       font-size: 15px;
+    }
+  }
+</style>
+", "svelte")
+#v(1cm)
+#show-file("Frontend/src/lib/schedule.js", "// Shared schedule constants and helpers for the editor and the page.
+
+export const ROOMS = Array.from({ length: 10 }, (_, i) => `ECC-8${String(i + 1).padStart(2, '0')}`);
+export const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+export const PERIOD_STARTS = [9, 13];
+export const COLUMNS = ['room', 'day', 'start', 'span', 'title', 'prof', 'students'];
+
+/** Professor names compare case- and whitespace-insensitively (as in the gateway). */
+export const profKey = (prof) => (prof ?? '').trim().split(/\\s+/).join(' ').toLowerCase();
+
+/**
+ * Time clashes between rows that fix both day and period: the same room,
+ * or the same professor, twice in one period. Returns Map(rowIndex ->
+ * { groups, with, messages }) for every clashing row.
+ */
+export function clashFlags(rows) {
+  const groups = new Map();
+  rows.forEach((row, i) => {
+    if (!row.day || !PERIOD_STARTS.map(String).includes(String(row.start ?? ''))) return;
+    const when = `${row.day}|${row.start}`;
+    const add = (key, message) => {
+      if (!groups.has(key)) groups.set(key, { message, rows: [] });
+      groups.get(key).rows.push(i);
+    };
+    const period = String(row.start) === '9' ? 'morning' : 'afternoon';
+    if (row.room) add(`room|${row.room}|${when}`, `${row.room} double-booked ${row.day} ${period}`);
+    const prof = profKey(row.prof);
+    if (prof) add(`prof|${prof}|${when}`, `${row.prof.trim()} teaches twice ${row.day} ${period}`);
+  });
+
+  const flags = new Map();
+  for (const [key, group] of groups) {
+    if (group.rows.length < 2) continue;
+    for (const i of group.rows) {
+      const flag = flags.get(i) ?? { groups: [], with: [], messages: [] };
+      flag.groups.push(key);
+      flag.messages.push(group.message);
+      for (const j of group.rows) if (j !== i && !flag.with.includes(j)) flag.with.push(j);
+      flags.set(i, flag);
+    }
+  }
+  return flags;
+}
+
+const cell = (value) => {
+  if (value === null || value === undefined || String(value).trim() === '') return 'NULL';
+  const text = String(value).trim();
+  return /[\",\\n\\r]/.test(text) ? `\"${text.replace(/\"/g, '\"\"')}\"` : text;
+};
+
+/** Editor rows (null = flexible) back to a schedule CSV. */
+export function rowsToCsv(rows) {
+  return [COLUMNS.join(','), ...rows.map((row) => COLUMNS.map((c) => cell(row[c])).join(','))].join('\\n') + '\\n';
+}
+", "javascript")
+#v(1cm)
+#show-file("Frontend/src/lib/ScheduleEditor.svelte", "<script>
+  // The schedule CSV editor: a pop-up over the page with two tabs.
+  //   Classes    — one row per CSV row; room / day / period are dropdowns
+  //                (\"Any\" = Prolog picks it), the rest are typed.
+  //   Professors — each professor's general preference (a day and/or a
+  //                period). The gateway rewrites day/start on all of that
+  //                professor's rows (/api/csv/professor-preference).
+  // Requests that clash (two fixed rows wanting one room or professor in
+  // one period) are flagged but allowed: the scheduler then moves one of
+  // them to a free spot (\"unsatisfied\" cases). Saving hands the rows back to the page,
+  // which re-runs the scheduler.
+  import { untrack } from 'svelte';
+  import { API_BASE } from '../config.js';
+  import { DAYS, ROOMS, PERIOD_STARTS, clashFlags, profKey } from './schedule.js';
+
+  let {
+    rows: initialRows = [],
+    fileName = '',
+    justUploaded = false,
+    canRun = false,
+    busy = false,
+    error = '',
+    maxCases = $bindable(10),
+    onsave,
+    oncancel,
+  } = $props();
+
+  let nextId = 0;
+  const withId = (row) => ({ ...row, _id: nextId++ });
+  let draft = $state(untrack(() => initialRows.map(withId)));
+  let tab = $state('classes');
+  let filter = $state('');
+  let dirty = $state(false);
+  let openProf = $state(null);
+  let prefBusy = $state(false);
+  let prefError = $state('');
+
+  const PERIOD_LABEL = { 9: 'Morning 09–12', 13: 'Afternoon 13–16' };
+
+  const flags = $derived(clashFlags(draft));
+  const clashCount = $derived(new Set([...flags.values()].flatMap((f) => f.groups)).size);
+
+  const visible = $derived.by(() => {
+    const q = filter.trim().toLowerCase();
+    return draft
+      .map((row, index) => ({ row, index }))
+      .filter(({ row }) => !q || `${row.title ?? ''} ${row.prof ?? ''}`.toLowerCase().includes(q));
+  });
+
+  const professors = $derived.by(() => {
+    const byKey = new Map();
+    draft.forEach((row, index) => {
+      const key = profKey(row.prof);
+      if (!key) return;
+      if (!byKey.has(key)) byKey.set(key, { key, name: row.prof.trim().replace(/\\s+/g, ' '), rows: [] });
+      byKey.get(key).rows.push(index);
+    });
+    const q = filter.trim().toLowerCase();
+    return [...byKey.values()]
+      .filter((p) => !q || p.name.toLowerCase().includes(q))
+      .map((p) => {
+        const days = new Set(p.rows.map((i) => draft[i].day ?? 'any'));
+        const periods = new Set(p.rows.map((i) => periodOf(draft[i].start)));
+        const day = days.size === 1 ? [...days][0] : 'mixed';
+        const period = periods.size === 1 ? [...periods][0] : 'mixed';
+        // Periods a preference leaves open, vs. how many classes need one.
+        const slots = (day === 'any' || day === 'mixed' ? 7 : 1) * (period === 'any' || period === 'mixed' ? 2 : 1);
+        return { ...p, day, period, mixedDays: [...days], tooMany: p.rows.length > slots };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
+
+  function periodOf(start) {
+    if (start == null || start === '') return 'any';
+    if (String(start) === '9') return 'morning';
+    if (String(start) === '13') return 'afternoon';
+    return 'other';
+  }
+
+  function set(index, field, value) {
+    draft[index][field] = value === '' ? null : value;
+    dirty = true;
+  }
+
+  function addRow() {
+    draft.push(withId({ room: null, day: null, start: null, span: '3', title: '', prof: '', students: '' }));
+    dirty = true;
+    filter = '';
+  }
+
+  function removeRow(index) {
+    draft.splice(index, 1);
+    dirty = true;
+  }
+
+  const strip = (rows) => rows.map(({ _id, ...row }) => row);
+
+  async function setPreference(prof, change) {
+    prefBusy = true;
+    prefError = '';
+    try {
+      const response = await fetch(`${API_BASE}/api/csv/professor-preference`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: strip(draft), prof: prof.name, day: 'keep', period: 'keep', ...change }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(typeof body?.detail === 'string' ? body.detail : `Request failed (${response.status})`);
+      // Same order back; keep each row's id so the Classes tab doesn't re-render from scratch.
+      draft = body.rows.map((row, i) => ({ ...row, _id: draft[i]._id }));
+      dirty = true;
+    } catch (err) {
+      prefError = err instanceof Error ? err.message : String(err);
+    } finally {
+      prefBusy = false;
+    }
+  }
+
+  function save() {
+    onsave?.(strip(draft));
+  }
+
+  function onkeydown(event) {
+    if (event.key === 'Escape' && !busy) oncancel?.();
+  }
+
+  const clashText = (f) =>
+    f.with.length ? `Clash · row ${f.with.map((i) => i + 1).join(', ')}` : '';
+</script>
+
+<svelte:window {onkeydown} />
+
+<div class=\"scrim\">
+  <div class=\"modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"editor-title\">
+    <header class=\"m-head\">
+      <h2 id=\"editor-title\">Edit schedule</h2>
+      <div class=\"sub\">
+        <div class=\"lbl dim\">{fileName || 'schedule.csv'}</div>
+        <div class=\"note\">
+          {#if justUploaded && !dirty}
+            <span class=\"lbl accent\">Just uploaded</span> — check it, then save to run the scheduler.
+          {:else if dirty}
+            <span class=\"lbl dim\">Unsaved changes</span>
+          {:else}
+            Leave room, day or period on <b>Any</b> and Prolog picks it.
+          {/if}
+        </div>
+      </div>
+      <button class=\"x\" type=\"button\" aria-label=\"Close without saving\" onclick={() => oncancel?.()} disabled={busy}>×</button>
+    </header>
+
+    <div class=\"m-tabs\" role=\"tablist\">
+      <button type=\"button\" role=\"tab\" aria-selected={tab === 'classes'} class:on={tab === 'classes'} onclick={() => (tab = 'classes')}>
+        Classes<i>{draft.length}</i>
+      </button>
+      <button type=\"button\" role=\"tab\" aria-selected={tab === 'profs'} class:on={tab === 'profs'} onclick={() => (tab = 'profs')}>
+        Professors<i>{professors.length}</i>
+      </button>
+    </div>
+
+    <div class=\"m-body\">
+      <div class=\"toolbar\">
+        <input
+          class=\"search\"
+          type=\"search\"
+          placeholder={tab === 'classes' ? 'Filter by title or professor' : 'Find a professor'}
+          bind:value={filter}
+        />
+        {#if tab === 'classes'}
+          <span class=\"hint\">Leave room, day or period on <b>Any</b> and Prolog picks it.</span>
+          <span class=\"sp\"></span>
+          <button class=\"btn ghost small\" type=\"button\" onclick={addRow}>+ Add class</button>
+        {:else}
+          <span class=\"hint\">
+            A preference rewrites <b>day</b> and <b>start</b> on every one of that professor's rows in the CSV. Room
+            stays per class.
+          </span>
+        {/if}
+      </div>
+
+      {#if tab === 'classes'}
+        <table class=\"classes\">
+          <thead>
+            <tr>
+              <th></th><th>Title</th><th>Professor</th><th class=\"r\">Students</th><th>Room</th><th>Day</th>
+              <th>Period</th><th>Span</th><th></th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each visible as { row, index } (row._id)}
+              {@const flag = flags.get(index)}
+              <tr class:clash={flag}>
+                <td class=\"idx\">{index + 1}</td>
+                <td><input class=\"t\" value={row.title ?? ''} oninput={(e) => set(index, 'title', e.target.value)} aria-label=\"Title, row {index + 1}\" /></td>
+                <td><input class=\"t\" value={row.prof ?? ''} oninput={(e) => set(index, 'prof', e.target.value)} aria-label=\"Professor, row {index + 1}\" /></td>
+                <td class=\"r\">
+                  <input class=\"t num\" inputmode=\"numeric\" value={row.students ?? ''} oninput={(e) => set(index, 'students', e.target.value)} aria-label=\"Students, row {index + 1}\" />
+                </td>
+                <td>
+                  <select value={row.room ?? ''} onchange={(e) => set(index, 'room', e.target.value)} aria-label=\"Room, row {index + 1}\">
+                    <option value=\"\">Any room</option>
+                    {#each ROOMS as room (room)}<option value={room}>{room}</option>{/each}
+                    {#if row.room && !ROOMS.includes(row.room)}<option value={row.room}>{row.room} (not on 8F)</option>{/if}
+                  </select>
+                </td>
+                <td>
+                  <select value={row.day ?? ''} onchange={(e) => set(index, 'day', e.target.value)} aria-label=\"Day, row {index + 1}\">
+                    <option value=\"\">Any day</option>
+                    {#each DAYS as day (day)}<option value={day}>{day}</option>{/each}
+                    {#if row.day && !DAYS.includes(row.day)}<option value={row.day}>{row.day} (invalid)</option>{/if}
+                  </select>
+                </td>
+                <td>
+                  <select value={row.start ?? ''} onchange={(e) => set(index, 'start', e.target.value)} aria-label=\"Period, row {index + 1}\">
+                    <option value=\"\">Any time</option>
+                    {#each PERIOD_STARTS as start (start)}<option value={String(start)}>{PERIOD_LABEL[start]}</option>{/each}
+                    {#if row.start && !PERIOD_STARTS.map(String).includes(String(row.start))}
+                      <option value={row.start}>Starts {row.start}:00 (invalid)</option>
+                    {/if}
+                  </select>
+                </td>
+                <td>
+                  <select class=\"span\" value={row.span ?? ''} onchange={(e) => set(index, 'span', e.target.value)} aria-label=\"Span, row {index + 1}\">
+                    <option value=\"3\">3 h</option>
+                    {#if String(row.span ?? '') !== '3'}<option value={row.span ?? ''}>{row.span ?? '—'} h (invalid)</option>{/if}
+                  </select>
+                </td>
+                <td>{#if flag}<span class=\"flag\" title={flag.messages.join('\\n')}>{clashText(flag)}</span>{/if}</td>
+                <td><button class=\"del\" type=\"button\" aria-label=\"Delete row {index + 1}\" onclick={() => removeRow(index)}>×</button></td>
+              </tr>
+            {:else}
+              <tr><td colspan=\"10\" class=\"empty\">{draft.length ? 'No class matches the filter.' : 'No classes yet — add one.'}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        {#if prefError}<p class=\"error\">{prefError}</p>{/if}
+        <table class=\"profs\">
+          <thead>
+            <tr><th>Professor</th><th>Classes</th><th>Preferred day</th><th>Preferred period</th><th></th></tr>
+          </thead>
+          <tbody>
+            {#each professors as prof (prof.key)}
+              {@const open = openProf === prof.key}
+              {@const clashing = prof.rows.some((i) => flags.has(i))}
+              <tr class:open>
+                <td class=\"pname\">{prof.name}{#if clashing}<span class=\"dot\" title=\"Asks for clashing periods\"></span>{/if}</td>
+                <td class=\"dim\">{prof.rows.length} class{prof.rows.length === 1 ? '' : 'es'}</td>
+                <td>
+                  <select
+                    value={prof.day}
+                    disabled={prefBusy}
+                    onchange={(e) => setPreference(prof, { day: e.target.value })}
+                    aria-label=\"Preferred day for {prof.name}\"
+                  >
+                    {#if prof.day === 'mixed'}<option value=\"mixed\" disabled>Mixed</option>{/if}
+                    <option value=\"any\">Any day</option>
+                    {#each DAYS as day (day)}<option value={day}>{day}</option>{/each}
+                  </select>
+                  {#if prof.day === 'mixed'}
+                    <span class=\"mixed\">rows differ: {prof.mixedDays.map((d) => (d === 'any' ? 'Any' : d)).join(' · ')}</span>
+                  {/if}
+                </td>
+                <td>
+                  <span class=\"pill\" role=\"group\" aria-label=\"Preferred period for {prof.name}\">
+                    {#each [['any', 'Any'], ['morning', 'Morning'], ['afternoon', 'Afternoon']] as [value, label] (value)}
+                      <button
+                        type=\"button\"
+                        class:on={prof.period === value}
+                        aria-pressed={prof.period === value}
+                        disabled={prefBusy}
+                        onclick={() => setPreference(prof, { period: value })}
+                      >{label}</button>
+                    {/each}
+                  </span>
+                  {#if prof.period === 'mixed' || prof.period === 'other'}<span class=\"mixed\">rows differ</span>{/if}
+                </td>
+                <td class=\"expand\">
+                  <button type=\"button\" onclick={() => (openProf = open ? null : prof.key)} aria-expanded={open}>
+                    {open ? '▾ Hide classes' : '▸ Show classes'}
+                  </button>
+                </td>
+              </tr>
+              {#if open || prof.tooMany}
+                <tr class=\"sub\" class:open>
+                  <td colspan=\"5\">
+                    {#if open}
+                      {#each prof.rows as i (i)}
+                        <span class=\"chip\">#{i + 1} {draft[i].title || 'Untitled'}{draft[i].room ? ` · ${draft[i].room.slice(4)}` : ''}</span>
+                      {/each}
+                    {/if}
+                    {#if prof.tooMany}
+                      <span class=\"warn\">
+                        ⚠ This preference leaves fewer periods than {prof.name}'s {prof.rows.length} classes — some will be
+                        moved elsewhere (allowed, shown as unsatisfied).
+                      </span>
+                    {/if}
+                  </td>
+                </tr>
+              {/if}
+            {:else}
+              <tr><td colspan=\"5\" class=\"empty\">No professors{filter ? ' match the search' : ' yet'}.</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
+
+    <footer class=\"m-foot\">
+      <span class=\"note\">
+        {#if error}
+          <span class=\"error\">{error}</span>
+        {:else if !canRun}
+          <span class=\"dim\">Choose the config JSON to run the scheduler — your edits are kept.</span>
+        {:else if clashCount}
+          <span class=\"dot\"></span><b>{clashCount} time clash{clashCount === 1 ? '' : 'es'}</b>
+          <span class=\"dim\"> — allowed; the scheduler moves a class to a free spot (an unsatisfied case).</span>
+        {:else}
+          <span class=\"dim\">No time clashes between fixed classes.</span>
+        {/if}
+      </span>
+      <label class=\"lbl cap\" title=\"0 = no cap: every case, however long it takes\">
+        Cases <span class=\"dim\">0 = no cap</span>
+        <input class=\"num\" type=\"number\" min=\"0\" bind:value={maxCases} disabled={busy} />
+      </label>
+      <button class=\"btn ghost\" type=\"button\" onclick={() => oncancel?.()} disabled={busy}>Cancel</button>
+      <button class=\"btn\" type=\"button\" onclick={save} disabled={busy || prefBusy}>
+        {#if busy}Scheduling…{:else if canRun}Save &amp; run scheduler{:else}Save{/if}
+      </button>
+    </footer>
+  </div>
+</div>
+
+<style>
+  .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(43, 43, 43, 0.42);
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+
+  .modal {
+    width: min(1120px, 100%);
+    height: min(760px, 100%);
+    background: var(--cream);
+    border: 1px solid var(--ink);
+    box-shadow: 0 30px 60px -20px rgba(30, 30, 50, 0.55);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .m-head {
+    display: flex;
+    align-items: flex-end;
+    gap: 24px;
+    padding: 22px 28px 0;
+  }
+
+  h2 {
+    margin: 0;
+    font: 800 44px/1 var(--serif);
+    letter-spacing: -0.01em;
+  }
+
+  .sub {
+    flex: 1;
+    min-width: 0;
+    padding-bottom: 4px;
+  }
+
+  .note {
+    font-size: 15px;
+  }
+
+  .accent {
+    color: var(--accent);
+  }
+
+  .dim {
+    color: var(--sub);
+  }
+
+  .x {
+    align-self: flex-start;
+    border: 0;
+    background: none;
+    font: 300 32px/1 var(--sans);
+    cursor: pointer;
+    padding: 0 4px;
+  }
+
+  .m-tabs {
+    display: flex;
+    padding: 0 28px;
+    margin-top: 16px;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .m-tabs button {
+    padding: 8px 18px 7px;
+    margin-bottom: -1px;
+    border: 1px solid transparent;
+    border-bottom: 0;
+    background: none;
+    font: 500 13px var(--sans);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--sub);
+    cursor: pointer;
+  }
+
+  .m-tabs button.on {
+    color: var(--ink);
+    background: var(--cream);
+    border-color: var(--ink);
+    border-bottom: 1px solid var(--cream);
+  }
+
+  .m-tabs i {
+    font: 600 13px var(--serif);
+    font-style: normal;
+    margin-left: 6px;
+    color: var(--hair);
+  }
+
+  /* The only part of the editor that scrolls. */
+  .m-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 14px 28px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--soft) transparent;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .sp {
+    flex: 1;
+  }
+
+  .search {
+    width: 260px;
+    flex: none;
+    padding: 5px 10px;
+    border: 1px solid var(--hair);
+    background: var(--cream);
+    font: 400 15px var(--sans);
+  }
+
+  .hint {
+    font-size: 13px;
+    color: var(--sub);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  th {
+    position: sticky;
+    top: -14px;
+    z-index: 1;
+    background: var(--cream);
+    text-align: left;
+    font: 500 11px var(--sans);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--sub);
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--soft);
+    vertical-align: middle;
+  }
+
+  .r {
+    text-align: right;
+  }
+
+  td.idx {
+    width: 34px;
+    font: 600 14px var(--serif);
+    color: var(--hair);
+  }
+
+  .t {
+    width: 100%;
+    padding: 4px 6px;
+    border: 1px solid transparent;
+    background: none;
+    font: 400 15px var(--sans);
+  }
+
+  .t.num {
+    width: 60px;
+    text-align: right;
+  }
+
+  .t:hover {
+    border-color: var(--hair);
+  }
+
+  .t:focus {
+    outline: 1px solid var(--accent);
+    border-color: var(--accent);
+    background: var(--cream);
+  }
+
+  select {
+    appearance: none;
+    padding: 4px 24px 4px 8px;
+    border: 1px solid var(--hair);
+    border-radius: 0;
+    background: var(--cream)
+      url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%232b2b2b' stroke-width='1.2'/%3E%3C/svg%3E\")
+      no-repeat right 8px center;
+    font: 400 15px var(--sans);
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  select:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  select.span {
+    color: var(--sub);
+  }
+
+  tr.clash td {
+    background: rgba(155, 44, 44, 0.06);
+  }
+
+  .flag {
+    display: inline-block;
+    padding: 1px 6px;
+    border: 1px solid var(--error);
+    font: 500 11px var(--sans);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--error);
+    white-space: nowrap;
+  }
+
+  .del {
+    width: 28px;
+    border: 0;
+    background: none;
+    color: var(--hair);
+    font: 300 20px var(--sans);
+    cursor: pointer;
+  }
+
+  .del:hover {
+    color: var(--error);
+  }
+
+  .empty {
+    padding: 24px 8px;
+    text-align: center;
+    color: var(--sub);
+  }
+
+  .pname {
+    font: 600 17px var(--serif);
+  }
+
+  .profs td {
+    padding: 7px 8px;
+  }
+
+  .profs select {
+    width: 120px;
+  }
+
+  tr.open td {
+    background: var(--hover);
+  }
+
+  tr.sub td {
+    padding-top: 0;
+    font-size: 14px;
+    color: var(--sub);
+  }
+
+  .pill {
+    display: inline-flex;
+    border: 1px solid var(--ink);
+  }
+
+  .pill button {
+    padding: 3px 10px;
+    border: 0;
+    border-left: 1px solid var(--ink);
+    background: none;
+    font: 500 12px var(--sans);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .pill button:first-child {
+    border-left: 0;
+  }
+
+  .pill button.on {
+    background: var(--ink);
+    color: var(--cream);
+  }
+
+  .pill button:hover:not(.on):not(:disabled) {
+    background: var(--hover);
+  }
+
+  .mixed {
+    margin-left: 6px;
+    font: 500 11px var(--sans);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .expand {
+    text-align: right;
+  }
+
+  .expand button {
+    border: 0;
+    background: none;
+    font: 400 13px var(--sans);
+    color: var(--sub);
+    cursor: pointer;
+  }
+
+  .chip {
+    display: inline-block;
+    margin: 0 4px 4px 0;
+    padding: 1px 7px;
+    border: 1px solid var(--hair);
+    font-size: 13px;
+  }
+
+  .warn {
+    color: var(--error);
+  }
+
+  .dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    margin: 0 6px;
+    border-radius: 50%;
+    background: var(--error);
+    vertical-align: middle;
+  }
+
+  .m-foot {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 28px;
+    border-top: 1px solid var(--ink);
+    background: var(--tan);
+  }
+
+  .m-foot .note {
+    flex: 1;
+    min-width: 0;
+    font-size: 15px;
+  }
+
+  .m-foot .note .dot {
+    margin-left: 0;
+  }
+
+  .error {
+    color: var(--error);
+    overflow-wrap: anywhere;
+  }
+
+  p.error {
+    margin: 0 0 8px;
+  }
+
+  .m-foot .error {
+    display: block;
+    max-height: 3em;
+    overflow: auto;
+  }
+
+  .cap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .num[type='number'] {
+    width: 64px;
+    padding: 5px 8px;
+    border: 1px solid var(--ink);
+    background: var(--cream);
+    font: 500 16px var(--sans);
+    text-align: right;
+  }
+
+  @media (max-width: 899px) {
+    .scrim {
+      padding: 8px;
+    }
+
+    h2 {
+      font-size: 30px;
+    }
+
+    .m-head,
+    .m-tabs,
+    .m-body,
+    .m-foot {
+      padding-left: 14px;
+      padding-right: 14px;
+    }
+
+    .hint {
+      display: none;
+    }
+
+    .m-foot {
+      flex-wrap: wrap;
     }
   }
 </style>
