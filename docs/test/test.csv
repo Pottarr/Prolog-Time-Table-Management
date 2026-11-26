@@ -1,0 +1,91 @@
+room,day,start,span,title,prof,students
+ECC-801,Mon,NULL,3,Algorithms (Section 1),Dr. Visit,41
+NULL,NULL,13,3,Algorithms (Section 2),Dr. Suphamit,32
+ECC-801,NULL,9,3,Algorithms (Section 3),Dr. Chaiwat,37
+ECC-807,Tue,NULL,3,Artificial Intelligence (Section 1),Dr. Chaiwat,38
+ECC-810,Tue,13,3,Artificial Intelligence (Section 2),Dr. Thanakorn,42
+ECC-801,Thu,13,3,Artificial Intelligence (Section 3),Dr. Natthapong,45
+ECC-807,Thu,NULL,3,Artificial Intelligence (Section 4),Dr. Kittipong,36
+ECC-804,Fri,13,3,Artificial Intelligence (Section 5),Dr. Kittipong,27
+ECC-810,Fri,13,3,Artificial Intelligence (Section 6),Dr. Chaiwat,48
+NULL,Thu,NULL,3,Blockchain Fundamentals (Elective),Dr. Thanakorn,14
+NULL,NULL,13,3,Capstone Project Meeting,Dr. Nuttida,20
+ECC-802,Mon,9,3,Cloud Computing (Section 1),Dr. Somchai,42
+ECC-801,Sat,NULL,3,Cloud Computing (Section 2),Dr. Apinya,48
+ECC-802,Mon,13,3,Compiler Design (Section 1),Dr. Benjawan,36
+NULL,Wed,13,3,Compiler Design (Section 2),Dr. Ekkachai,46
+ECC-803,Thu,13,3,Compiler Design (Section 3),Dr. Isara,33
+ECC-802,NULL,NULL,3,Compiler Design (Section 4),Dr. Pipat,44
+ECC-808,NULL,NULL,3,Computer Architecture (Section 1),Dr. Apinya,97
+ECC-808,NULL,NULL,3,Computer Architecture (Section 2),Dr. Suphamit,61
+ECC-809,NULL,NULL,3,Computer Architecture (Section 3),Dr. Nuttida,87
+ECC-803,Mon,9,3,Computer Networks (Section 1),Dr. Siriporn,27
+ECC-803,NULL,NULL,3,Computer Networks (Section 2),Dr. Visit,29
+ECC-802,NULL,NULL,3,Computer Networks (Section 3),Dr. Kittipong,25
+ECC-810,NULL,NULL,3,Computer Networks (Section 4),Dr. Kittipong,33
+ECC-807,Thu,9,3,Computer Networks (Section 5),Dr. Ekkachai,40
+ECC-805,Tue,9,3,Computer Vision (Elective),Dr. Kanokwan,20
+ECC-809,NULL,NULL,3,Data Structures and Algorithms (Section 1),Dr. Jirawat,60
+ECC-809,NULL,NULL,3,Data Structures and Algorithms (Section 2),Dr. Siriporn,71
+ECC-808,Wed,13,3,Data Structures and Algorithms (Section 3),Dr. Pornthip,61
+ECC-809,Fri,NULL,3,Data Structures and Algorithms (Section 4),Dr. Visit,67
+ECC-810,NULL,9,3,Database Systems (Section 1),Dr. Pornthip,35
+ECC-801,NULL,NULL,3,Database Systems (Section 2),Dr. Pornthip,39
+NULL,NULL,9,3,Database Systems (Section 3),Dr. Suphamit,32
+ECC-808,NULL,13,3,Discrete Mathematics,Dr. Kanokwan,73
+ECC-804,Tue,9,3,Distributed Systems (Section 1),Dr. Somchai,33
+ECC-804,NULL,NULL,3,Distributed Systems (Section 2),Dr. Chaiwat,45
+ECC-810,Thu,NULL,3,Distributed Systems (Section 3),Dr. Benjawan,44
+ECC-805,Tue,13,3,Formal Methods (Elective),Dr. Veera,16
+ECC-805,Mon,9,3,Game Development (Elective),Dr. Apinya,19
+ECC-810,Mon,9,3,Human-Computer Interaction (Section 1),Dr. Isara,46
+ECC-803,Tue,9,3,Human-Computer Interaction (Section 2),Dr. Nuttida,36
+ECC-801,NULL,9,3,Human-Computer Interaction (Section 3),Dr. Kanokwan,27
+ECC-802,NULL,NULL,3,Information Security (Section 1),Dr. Veera,36
+ECC-802,Tue,NULL,3,Information Security (Section 2),Dr. Siriporn,47
+ECC-801,NULL,13,3,Information Security (Section 3),Dr. Wanchai,44
+ECC-802,NULL,NULL,3,Information Security (Section 4),Dr. Ekkachai,43
+ECC-809,Wed,NULL,3,Introduction to Programming,Dr. Natthapong,82
+ECC-807,Mon,13,3,Machine Learning (Section 1),Dr. Natthapong,27
+ECC-810,NULL,NULL,3,Machine Learning (Section 2),Dr. Apinya,37
+ECC-810,Sat,9,3,Machine Learning (Section 3),Dr. Siriporn,25
+NULL,NULL,9,3,Mobile Application Development (Section 1),Dr. Rattana,25
+ECC-801,NULL,NULL,3,Mobile Application Development (Section 2),Dr. Isara,29
+NULL,NULL,13,3,Mobile Application Development (Section 3),Dr. Rattana,36
+ECC-803,NULL,NULL,3,Mobile Application Development (Section 4),Dr. Kanokwan,30
+ECC-804,Fri,9,3,Mobile Application Development (Section 5),Dr. Jirawat,25
+ECC-804,NULL,NULL,3,Mobile Application Development (Section 6),Dr. Pipat,42
+ECC-805,NULL,NULL,3,Natural Language Processing (Elective),Dr. Wanchai,20
+ECC-809,Tue,13,3,Object-Oriented Programming,Dr. Pipat,92
+NULL,Mon,NULL,3,Operating Systems (Section 1),Dr. Benjawan,45
+NULL,Tue,9,3,Operating Systems (Section 2),Dr. Jirawat,32
+ECC-807,Fri,9,3,Operating Systems (Section 3),Dr. Pipat,30
+ECC-808,Fri,NULL,3,Physics for Engineers (Section 1),Dr. Isara,69
+ECC-809,NULL,NULL,3,Physics for Engineers (Section 2),Dr. Kittipong,91
+ECC-809,NULL,NULL,3,Probability and Statistics,Dr. Benjawan,80
+ECC-803,NULL,NULL,3,Requirements Engineering (Section 1),Dr. Pornthip,30
+ECC-801,Tue,NULL,3,Requirements Engineering (Section 2),Dr. Thanakorn,26
+ECC-810,NULL,NULL,3,Requirements Engineering (Section 3),Dr. Ekkachai,35
+ECC-804,NULL,NULL,3,Requirements Engineering (Section 4),Dr. Apinya,47
+ECC-805,NULL,NULL,3,Research Seminar (Section 1),Dr. Jirawat,18
+ECC-805,NULL,NULL,3,Research Seminar (Section 2),Dr. Pornthip,18
+ECC-804,Wed,9,3,Software Design and Architecture (Section 1),Dr. Rattana,38
+ECC-807,NULL,NULL,3,Software Design and Architecture (Section 2),Dr. Visit,47
+ECC-802,NULL,NULL,3,Software Design and Architecture (Section 3),Dr. Jirawat,33
+ECC-803,Fri,13,3,Software Design and Architecture (Section 4),Dr. Thanakorn,33
+ECC-807,Fri,NULL,3,Software Design and Architecture (Section 5),Dr. Suphamit,43
+ECC-808,NULL,NULL,3,Software Engineering Principles (Section 1),Dr. Thanakorn,90
+NULL,Mon,NULL,3,Software Engineering Principles (Section 2),Dr. Ekkachai,87
+ECC-809,NULL,NULL,3,Software Engineering Principles (Section 3),Dr. Chaiwat,71
+ECC-808,NULL,NULL,3,Software Engineering Principles (Section 4),Dr. Somchai,88
+ECC-808,Thu,NULL,3,Software Engineering Principles (Section 5),Dr. Rattana,84
+ECC-809,NULL,NULL,3,Software Engineering Principles (Section 6),Dr. Wanchai,77
+ECC-808,NULL,NULL,3,Software Engineering Principles (Section 7),Dr. Veera,75
+NULL,Mon,13,3,Software Testing (Section 1),Dr. Wanchai,27
+ECC-807,Tue,NULL,3,Software Testing (Section 2),Dr. Isara,42
+ECC-803,NULL,NULL,3,Software Testing (Section 3),Dr. Benjawan,31
+ECC-805,NULL,NULL,3,Technical Writing (Section 1),Dr. Siriporn,15
+ECC-805,Wed,13,3,Technical Writing (Section 2),Dr. Somchai,13
+ECC-804,NULL,9,3,Web Application Development (Section 1),Dr. Natthapong,28
+ECC-803,NULL,NULL,3,Web Application Development (Section 2),Dr. Veera,36
+ECC-802,NULL,9,3,Web Application Development (Section 3),Dr. Nuttida,40
